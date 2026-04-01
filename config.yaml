@@ -1,0 +1,44 @@
+data:
+  data_dir: "data"
+  linxy_configs:
+    - "full"
+    - "synthetic_handwrite"
+    - "human_handwrite"
+  oleehyo_config: "cleaned_formulas"
+  max_token_len: 200
+  image_height: 64
+  max_image_width: 672
+  patch_size: 16
+
+model:
+  tokenizer_name: "Qwen/Qwen2.5-Coder-1.5B"
+  embed_dim: 768
+  num_heads: 12
+  num_layers: 12
+  mlp_ratio: 4
+  dropout: 0.1
+  bridge_out_dim: 2048
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  load_in_8bit: false
+
+train:
+  stage1_epochs: 5
+  stage2_epochs: 10
+  batch_size: 8
+  grad_accum: 4
+  lr_stage1: 1.0e-4
+  lr_stage2: 5.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  eval_every: 1000
+  save_every: 2000
+  eval_samples: 200
+  num_workers: 2
+  seed: 42
+
+paths:
+  ckpt_dir: "checkpoints"
+  stage1_ckpt: "stage1_final.pt"
+  stage2_ckpt: "stage2_final.pt"
