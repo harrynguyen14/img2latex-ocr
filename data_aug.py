@@ -2,7 +2,6 @@ import argparse
 import random
 import io
 import json
-import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -11,9 +10,56 @@ from PIL import Image, ImageFilter, ImageDraw
 from tqdm import tqdm
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
-from datasets import load_from_disk
+from datasets import load_dataset, concatenate_datasets
 
+from utils import is_valid_sample, strip_align, resize_image
+
+MAX_TOKEN_LEN = 200
 CLEAN_RATIO = 0.35
+
+LINXY_CONFIGS = ["full", "synthetic_handwrite", "human_handwrite"]
+OLEEHYO_CONFIG = "cleaned_formulas"
+
+
+def load_and_filter():
+    all_train, all_val, all_test = [], [], []
+
+    for cfg_name in tqdm(LINXY_CONFIGS, desc="Loading linxy configs"):
+        ds = load_dataset("linxy/LaTeX_OCR", cfg_name, trust_remote_code=True)
+        for split_name, split_data in ds.items():
+            filtered = split_data.filter(
+                lambda x: is_valid_sample(x["text"], MAX_TOKEN_LEN),
+                desc=f"Filtering linxy/{cfg_name}/{split_name}",
+            )
+            renamed = filtered.select_columns(["image", "text"]).rename_column("text", "label")
+            if split_name == "train":
+                all_train.append(renamed)
+            elif split_name == "validation":
+                all_val.append(renamed)
+            elif split_name == "test":
+                all_test.append(renamed)
+
+    print("Loading OleehyO/latex-formulas ...")
+    ds_olee = load_dataset("OleehyO/latex-formulas", OLEEHYO_CONFIG, trust_remote_code=True)
+    for split_name, split_data in ds_olee.items():
+        filtered = split_data.map(
+            lambda x: {"label": strip_align(x["latex_formula"])},
+            desc=f"Processing OleehyO/{split_name}",
+        )
+        filtered = filtered.filter(
+            lambda x: is_valid_sample(x["label"], MAX_TOKEN_LEN),
+            desc=f"Filtering OleehyO/{split_name}",
+        )
+        filtered = filtered.select_columns(["image", "label"])
+        if split_name == "train":
+            all_train.append(filtered)
+
+    print("Concatenating and shuffling ...")
+    train_ds = concatenate_datasets(all_train).shuffle(seed=42)
+    val_ds = concatenate_datasets(all_val) if all_val else None
+    test_ds = concatenate_datasets(all_test) if all_test else None
+
+    return train_ds, val_ds, test_ds
 
 
 def aug_jpeg_compression(img):
@@ -149,18 +195,17 @@ def apply_augmentation(img: Image.Image, stage: int = 1) -> Image.Image:
 
 def process_one(args):
     idx, sample, out_dir, stage = args
-    img = sample["image"]
+    img = sample["image"].convert("RGB")
     label = sample["label"]
     aug_img = apply_augmentation(img, stage=stage)
+    aug_img = resize_image(aug_img)
     img_path = out_dir / f"{idx:08d}.png"
     aug_img.save(img_path, format="PNG")
     return {"img_path": str(img_path), "label": label}
 
 
-def run_augmentation(data_dir: Path, out_dir: Path, stage: int, num_workers: int = 4):
-    ds = load_from_disk(str(data_dir / "train"))
+def run_augmentation(ds, out_dir: Path, stage: int, num_workers: int = 4):
     out_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"Augmenting {len(ds)} samples (stage={stage}) -> {out_dir}")
 
     manifest = []
@@ -168,22 +213,39 @@ def run_augmentation(data_dir: Path, out_dir: Path, stage: int, num_workers: int
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {executor.submit(process_one, t): t[0] for t in tasks}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Augmenting"):
-            result = future.result()
-            manifest.append(result)
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Stage {stage}"):
+            manifest.append(future.result())
 
     manifest.sort(key=lambda x: x["img_path"])
     manifest_path = out_dir / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    print(f"Done. {len(manifest)} samples saved to {out_dir}")
     print(f"Manifest: {manifest_path}")
+    return manifest_path
+
+
+def save_val_test(val_ds, test_ds, out_dir: Path):
+    for split_name, ds in [("val", val_ds), ("test", test_ds)]:
+        if ds is None:
+            continue
+        split_dir = out_dir / split_name
+        split_dir.mkdir(parents=True, exist_ok=True)
+        manifest = []
+        for i in tqdm(range(len(ds)), desc=f"Saving {split_name}"):
+            sample = ds[i]
+            img = sample["image"].convert("RGB")
+            img = resize_image(img)
+            img_path = split_dir / f"{i:08d}.png"
+            img.save(img_path, format="PNG")
+            manifest.append({"img_path": str(img_path), "label": sample["label"]})
+        with open(split_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        print(f"Saved {split_name}: {split_dir / 'manifest.json'}")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Pre-augment dataset và lưu ra disk")
-    parser.add_argument("--data_dir", type=str, default="data")
+    parser = argparse.ArgumentParser(description="Download, filter, augment và lưu ra disk")
     parser.add_argument("--out_dir", type=str, default="data/augmented")
     parser.add_argument("--num_workers", type=int, default=4)
     return parser.parse_args()
@@ -191,10 +253,12 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    out_dir = Path(args.out_dir)
+
+    print("Downloading and filtering datasets...")
+    train_ds, val_ds, test_ds = load_and_filter()
+
     for stage in [1, 2]:
-        run_augmentation(
-            data_dir=Path(args.data_dir),
-            out_dir=Path(args.out_dir) / f"stage{stage}",
-            stage=stage,
-            num_workers=args.num_workers,
-        )
+        run_augmentation(train_ds, out_dir / f"stage{stage}", stage, args.num_workers)
+
+    save_val_test(val_ds, test_ds, out_dir)

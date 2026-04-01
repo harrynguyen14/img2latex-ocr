@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
-from datasets import load_from_disk
 from pathlib import Path
 from tqdm import tqdm
 
@@ -12,6 +11,7 @@ from encode import collate_images
 from evaluate import compute_metrics
 from modeling_latex_ocr import LaTeXOCRConfig, LaTeXOCRModel
 from utils import load_yaml, get_device
+
 
 
 def merge_args(cfg: dict, args: argparse.Namespace) -> dict:
@@ -25,7 +25,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train NaViT + Qwen2.5-Coder LaTeX OCR")
     parser.add_argument("--config", type=str, default="config.yaml")
 
-    parser.add_argument("--data_dir", type=str)
     parser.add_argument("--max_token_len", type=int)
 
     parser.add_argument("--tokenizer_name", type=str)
@@ -54,8 +53,9 @@ def parse_args():
     parser.add_argument("--only_stage", type=int, choices=[1, 2], default=None)
     parser.add_argument("--resume", type=str, default=None,
                         help="Tên folder checkpoint để resume (vd: checkpoint-1000)")
-    parser.add_argument("--aug_manifest_stage1", type=str, default=None)
-    parser.add_argument("--aug_manifest_stage2", type=str, default=None)
+    parser.add_argument("--aug_manifest_stage1", type=str, required=True)
+    parser.add_argument("--aug_manifest_stage2", type=str, required=True)
+    parser.add_argument("--val_manifest", type=str, default=None)
 
     return parser.parse_args()
 
@@ -215,11 +215,8 @@ def main():
     torch.manual_seed(cfg.get("seed", 42))
     ckpt_dir = Path(cfg["ckpt_dir"])
     ckpt_dir.mkdir(exist_ok=True)
-    data_dir = Path(cfg["data_dir"])
 
     tokenizer = get_tokenizer()
-    train_ds_raw = load_from_disk(str(data_dir / "train"))
-    val_ds_raw = load_from_disk(str(data_dir / "val")) if (data_dir / "val").exists() else None
 
     only_stage = args.only_stage
 
@@ -237,8 +234,8 @@ def main():
             model.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
             start_step = trainer_state.get("step", 0)
 
-        train_ds = LaTeXDataset(train_ds_raw, tokenizer, augmented_manifest=args.aug_manifest_stage1)
-        val_ds = LaTeXDataset(val_ds_raw, tokenizer) if val_ds_raw else None
+        train_ds = LaTeXDataset(args.aug_manifest_stage1, tokenizer)
+        val_ds = LaTeXDataset(args.val_manifest, tokenizer) if args.val_manifest else None
         train_loader = make_loader(train_ds, cfg)
         val_loader = make_loader(val_ds, cfg, shuffle=False) if val_ds else None
 
@@ -268,8 +265,8 @@ def main():
             model2.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
             start_step = trainer_state.get("step", 0)
 
-        train_ds2 = LaTeXDataset(train_ds_raw, tokenizer, augmented_manifest=args.aug_manifest_stage2)
-        val_ds2 = LaTeXDataset(val_ds_raw, tokenizer) if val_ds_raw else None
+        train_ds2 = LaTeXDataset(args.aug_manifest_stage2, tokenizer)
+        val_ds2 = LaTeXDataset(args.val_manifest, tokenizer) if args.val_manifest else None
         train_loader2 = make_loader(train_ds2, cfg)
         val_loader2 = make_loader(val_ds2, cfg, shuffle=False) if val_ds2 else None
 
