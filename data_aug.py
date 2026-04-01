@@ -204,17 +204,26 @@ def process_one(args):
     return {"img_path": str(img_path), "label": label}
 
 
+CHUNK_SIZE = 500
+
+
 def run_augmentation(ds, out_dir: Path, stage: int, num_workers: int = 4):
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Augmenting {len(ds)} samples (stage={stage}) -> {out_dir}")
+    n = len(ds)
+    print(f"Augmenting {n} samples (stage={stage}) -> {out_dir}")
 
     manifest = []
-    tasks = [(i, ds[i], out_dir, stage) for i in range(len(ds))]
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(process_one, t): t[0] for t in tasks}
-        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Stage {stage}"):
-            manifest.append(future.result())
+    for chunk_start in tqdm(range(0, n, CHUNK_SIZE), desc=f"Stage {stage} chunks"):
+        chunk_end = min(chunk_start + CHUNK_SIZE, n)
+        tasks = [(i, ds[i], out_dir, stage) for i in range(chunk_start, chunk_end)]
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(process_one, t): t[0] for t in tasks}
+            for future in as_completed(futures):
+                manifest.append(future.result())
+
+        del tasks
 
     manifest.sort(key=lambda x: x["img_path"])
     manifest_path = out_dir / "manifest.json"
@@ -232,13 +241,15 @@ def save_val_test(val_ds, test_ds, out_dir: Path):
         split_dir = out_dir / split_name
         split_dir.mkdir(parents=True, exist_ok=True)
         manifest = []
-        for i in tqdm(range(len(ds)), desc=f"Saving {split_name}"):
-            sample = ds[i]
-            img = sample["image"].convert("RGB")
-            img = resize_image(img)
-            img_path = split_dir / f"{i:08d}.png"
-            img.save(img_path, format="PNG")
-            manifest.append({"img_path": str(img_path), "label": sample["label"]})
+        for chunk_start in range(0, len(ds), CHUNK_SIZE):
+            chunk_end = min(chunk_start + CHUNK_SIZE, len(ds))
+            for i in tqdm(range(chunk_start, chunk_end), desc=f"Saving {split_name} {chunk_start}-{chunk_end}"):
+                sample = ds[i]
+                img = sample["image"].convert("RGB")
+                img = resize_image(img)
+                img_path = split_dir / f"{i:08d}.png"
+                img.save(img_path, format="PNG")
+                manifest.append({"img_path": str(img_path), "label": sample["label"]})
         with open(split_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
         print(f"Saved {split_name}: {split_dir / 'manifest.json'}")
