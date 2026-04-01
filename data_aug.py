@@ -199,8 +199,8 @@ def process_one(args):
     label = sample["label"]
     aug_img = apply_augmentation(img, stage=stage)
     aug_img = resize_image(aug_img)
-    img_path = out_dir / f"{idx:08d}.png"
-    aug_img.save(img_path, format="PNG")
+    img_path = out_dir / f"{idx:08d}.jpg"
+    aug_img.save(img_path, format="JPEG", quality=90)
     return {"img_path": str(img_path), "label": label}
 
 
@@ -247,8 +247,8 @@ def save_val_test(val_ds, test_ds, out_dir: Path):
                 sample = ds[i]
                 img = sample["image"].convert("RGB")
                 img = resize_image(img)
-                img_path = split_dir / f"{i:08d}.png"
-                img.save(img_path, format="PNG")
+                img_path = split_dir / f"{i:08d}.jpg"
+                img.save(img_path, format="JPEG", quality=95)
                 manifest.append({"img_path": str(img_path), "label": sample["label"]})
         with open(split_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -259,6 +259,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Download, filter, augment và lưu ra disk")
     parser.add_argument("--out_dir", type=str, default="data/augmented")
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--stages", type=int, nargs="+", default=[1, 2], choices=[1, 2],
+                        help="Stage(s) to run, e.g. --stages 2 to skip stage 1")
+    parser.add_argument("--skip_val_test", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -269,7 +272,8 @@ if __name__ == "__main__":
     print("Downloading and filtering datasets...")
     train_ds, val_ds, test_ds = load_and_filter()
 
-    for stage in [1, 2]:
+    for stage in args.stages:
         run_augmentation(train_ds, out_dir / f"stage{stage}", stage, args.num_workers)
 
-    save_val_test(val_ds, test_ds, out_dir)
+    if not args.skip_val_test:
+        save_val_test(val_ds, test_ds, out_dir)
