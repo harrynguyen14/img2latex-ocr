@@ -89,7 +89,6 @@ def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int) 
         dataloader_num_workers=cfg["num_workers"],
         remove_unused_columns=False,   # giữ pixel_values, patch_mask, raw_labels
         seed=cfg.get("seed", 42),
-        predict_with_generate=False,   # prediction_step tự xử lý generate
         label_names=["labels"],
     )
 
