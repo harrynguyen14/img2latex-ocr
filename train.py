@@ -111,7 +111,7 @@ def evaluate(model, loader, device: torch.device,
         if max_batches and i >= max_batches:
             break
         batch = move_batch_to_device(batch, device)
-        with torch.amp.autocast("cuda", dtype=torch.float16):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             output = unwrapped_model(**batch)
         total_loss  += output.loss.detach()
         total_count += 1
@@ -181,7 +181,7 @@ def run_training_phase(phase: str, config: dict, data_path: str,
         if is_master:
             print(f"Resumed from {resume}")
 
-    model           = DDP(model, device_ids=[local_rank], find_unused_parameters=True,
+    model           = DDP(model, device_ids=[local_rank],
                           gradient_as_bucket_view=True)
     model._set_static_graph()
     unwrapped_model = model.module
@@ -203,7 +203,8 @@ def run_training_phase(phase: str, config: dict, data_path: str,
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=peak_lr, weight_decay=config["weight_decay"])
-    scaler    = torch.amp.GradScaler("cuda")
+    # bfloat16 has wider dynamic range than float16 → no loss scaling needed
+    scaler    = torch.amp.GradScaler("cuda", enabled=False)
 
     log_every   = config.get("log_steps", 10)
     global_step = 0
@@ -234,7 +235,7 @@ def run_training_phase(phase: str, config: dict, data_path: str,
         is_sync = (micro_step == grad_accum - 1)
 
         with model.no_sync() if not is_sync else contextlib.nullcontext():
-            with torch.amp.autocast("cuda", dtype=torch.float16):
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 output = model(**batch)
                 loss   = output.loss / grad_accum
             scaler.scale(loss).backward()
