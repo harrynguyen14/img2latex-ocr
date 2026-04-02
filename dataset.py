@@ -98,7 +98,13 @@ class LaTeXDataset(IterableDataset):
                 self.num_samples = None
 
         # Shard tại HF dataset level — mỗi rank chỉ đọc phần của mình
-        self.ds = ds.skip(rank).take_every(world_size) if world_size > 1 else ds
+        if world_size > 1:
+            self.ds = ds.filter(
+                lambda _, idx: idx % world_size == rank,
+                with_indices=True,
+            )
+        else:
+            self.ds = ds
 
     def __iter__(self):
         for sample in self.ds:
