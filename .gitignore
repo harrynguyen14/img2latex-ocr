@@ -7,4 +7,6 @@ analyze.py
 build_dataset.py
 eval_data.py
 data_aug.py
- __pycache__
+__pycache__/
+*.pyc
+*.pyo
