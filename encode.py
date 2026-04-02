@@ -166,7 +166,7 @@ def _pack_images(pixel_values: torch.Tensor, patch_mask: torch.Tensor, encoder: 
     packed = torch.cat(token_seqs, dim=0)
 
     total = packed.shape[0]
-    attn_mask = torch.full((total, total), float("-inf"), device=device, dtype=torch.float32)
+    attn_mask = torch.full((total, total), float("-inf"), device=device, dtype=packed.dtype)
     offset = 0
     for length in patch_lengths:
         attn_mask[offset:offset + length, offset:offset + length] = 0.0
