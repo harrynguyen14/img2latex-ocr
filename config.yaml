@@ -19,8 +19,8 @@ model:
 train:
   stage1_epochs: 5
   stage2_epochs: 10
-  batch_size: 2
-  grad_accum: 16
+  batch_size: 6       # tăng từ 2 → 6 (~3x throughput); giảm nếu OOM
+  grad_accum: 6       # giữ effective batch = 6*2*6 = 72 ≈ trước (2*2*16=64)
   lr_stage1: 1.0e-4
   lr_stage2: 5.0e-5
   weight_decay: 0.01
@@ -28,7 +28,7 @@ train:
   eval_steps: 1000
   save_steps: 1000
   eval_samples: 200
-  num_workers: 2
+  num_workers: 4      # tăng từ 2 → 4 để tránh CPU bottleneck
   seed: 42
   report_to: "tensorboard"   # hoặc "wandb"
 

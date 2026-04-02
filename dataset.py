@@ -2,7 +2,7 @@ import io
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from transformers import AutoTokenizer
 
 from constants import (
@@ -20,13 +20,11 @@ def get_tokenizer():
 
 def _resize(img: Image.Image) -> Image.Image:
     w, h = img.size
-    if h != IMAGE_HEIGHT:
-        w = int(w * IMAGE_HEIGHT / h)
-        img = img.resize((w, IMAGE_HEIGHT), Image.LANCZOS)
-    w = min(img.size[0], MAX_IMAGE_WIDTH)
-    w = max((w // PATCH_SIZE) * PATCH_SIZE, PATCH_SIZE)
-    if img.size[0] != w:
-        img = img.resize((w, IMAGE_HEIGHT), Image.LANCZOS)
+    # Compute target width in one step: scale by height ratio, then snap to patch grid
+    new_w = int(w * IMAGE_HEIGHT / h) if h != IMAGE_HEIGHT else w
+    new_w = max((min(new_w, MAX_IMAGE_WIDTH) // PATCH_SIZE) * PATCH_SIZE, PATCH_SIZE)
+    if (w, h) != (new_w, IMAGE_HEIGHT):
+        img = img.resize((new_w, IMAGE_HEIGHT), Image.BILINEAR)
     return img
 
 
@@ -75,20 +73,32 @@ class LaTeXDataset(IterableDataset):
         self.split      = split
         self.rank       = rank
         self.world_size = world_size
+        self.data_path  = data_path
+        self.streaming_ds = None  # fallback for non-parquet paths
 
         p = Path(data_path)
         if p.exists():
             import pyarrow.parquet as pq
-            files = sorted(p.glob(f"{split}-*.parquet"))
-            ds    = load_dataset(
-                "parquet",
-                data_files={split: [str(f) for f in files]},
-                split=split,
-                streaming=True,
-            )
-            self.num_samples = sum(pq.read_metadata(f).num_rows for f in files)
+            all_files = sorted(p.glob(f"{split}-*.parquet"))
+            self.num_samples = sum(pq.read_metadata(f).num_rows for f in all_files)
+
+            # File-level DDP sharding: each rank owns a subset of parquet files
+            self.files = [f for i, f in enumerate(all_files) if i % world_size == rank]
+            if not self.files:
+                # Fewer files than ranks — fall back to row-level filter on all files
+                self.files = all_files
+                self._row_filter = True
+            else:
+                self._row_filter = False
         else:
+            self.files = None
             ds = load_dataset(data_path, split=split, streaming=True)
+            if world_size > 1:
+                ds = ds.filter(
+                    lambda _, idx: idx % world_size == rank,
+                    with_indices=True,
+                )
+            self.streaming_ds = ds
             try:
                 from datasets import load_dataset_builder
                 builder = load_dataset_builder(data_path)
@@ -97,15 +107,34 @@ class LaTeXDataset(IterableDataset):
             except Exception:
                 self.num_samples = None
 
-        # Shard tại HF dataset level — mỗi rank chỉ đọc phần của mình
-        if world_size > 1:
-            self.ds = ds.filter(
-                lambda _, idx: idx % world_size == rank,
-                with_indices=True,
-            )
+    def _iter_files(self, files):
+        """Iterate over a list of parquet files, further sharding among DataLoader workers."""
+        from datasets import load_dataset
+
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            # Split assigned files across DataLoader workers
+            worker_files = [f for i, f in enumerate(files)
+                            if i % worker_info.num_workers == worker_info.id]
         else:
-            self.ds = ds
+            worker_files = files
+
+        if not worker_files:
+            return
+
+        ds = load_dataset(
+            "parquet",
+            data_files={self.split: [str(f) for f in worker_files]},
+            split=self.split,
+            streaming=True,
+        )
+        for sample in ds:
+            yield _process(sample, self.tokenizer)
 
     def __iter__(self):
-        for sample in self.ds:
-            yield _process(sample, self.tokenizer)
+        if self.files is not None:
+            yield from self._iter_files(self.files)
+        else:
+            # HF Hub streaming fallback — workers get same stream, no further splitting
+            for sample in self.streaming_ds:
+                yield _process(sample, self.tokenizer)

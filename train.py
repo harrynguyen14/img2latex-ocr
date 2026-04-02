@@ -36,6 +36,10 @@ def get_lr(step: int, max_steps: int, lr: float, warmup_steps: int) -> float:
 
 
 def setup_ddp():
+    # Suppress hostname resolution warnings in container environments
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "eth0")
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", "eth0")
+    os.environ.setdefault("NCCL_DEBUG", "WARN")
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
     rank       = dist.get_rank()
@@ -198,9 +202,12 @@ def run_stage(stage: int, cfg: dict, data_path: str,
 
         scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg["max_grad_norm"])
+
+        scale_before = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        skipped = scaler.get_scale() < scale_before  # scaler reduced scale → step was skipped
 
         global_step += 1
         micro_step   = 0
@@ -210,11 +217,12 @@ def run_stage(stage: int, cfg: dict, data_path: str,
         cur_epoch = global_step / max_steps * num_epochs
         pbar.update(1)
         if is_master:
+            norm_str = "skip" if skipped else f"{grad_norm:.3f}"
             tqdm.write(
                 f"[{global_step}/{max_steps}]"
                 f"  epoch={cur_epoch:.3f}"
                 f"  loss={step_loss:.4f}"
-                f"  grad_norm={grad_norm:.3f}"
+                f"  grad_norm={norm_str}"
                 f"  lr={cur_lr:.2e}"
             )
 
@@ -261,6 +269,9 @@ def parse_args():
 def main():
     args = parse_args()
     cfg  = load_config(args.config)
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # avoid deadlock with DataLoader workers
+    torch.backends.cudnn.benchmark = True            # faster conv ops for fixed input sizes
 
     rank, local_rank, world_size = setup_ddp()
     torch.manual_seed(cfg.get("seed", 42) + rank)
