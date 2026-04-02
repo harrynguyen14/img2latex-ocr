@@ -25,10 +25,10 @@ train:
   lr_stage2: 5.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0
-  eval_steps: 1000       # tương đương eval_every cũ
-  save_steps: 2000       # tương đương save_every cũ
+  eval_steps: 1000
+  save_steps: 1000
   eval_samples: 200
-  num_workers: 4
+  num_workers: 2
   seed: 42
   report_to: "tensorboard"   # hoặc "wandb"
 

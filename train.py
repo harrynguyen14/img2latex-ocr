@@ -58,7 +58,7 @@ def build_loader(data_path: str, split: str, tokenizer, cfg: dict,
         collate_fn=LaTeXDataCollator(),
         num_workers=cfg["num_workers"],
         pin_memory=True,
-        prefetch_factor=4 if cfg["num_workers"] > 0 else None,
+        prefetch_factor=2 if cfg["num_workers"] > 0 else None,
         persistent_workers=cfg["num_workers"] > 0,
     ), ds.num_samples
 
@@ -210,10 +210,10 @@ def run_stage(stage: int, cfg: dict, data_path: str,
 
         pbar.update(1)
         pbar.set_postfix(ordered_dict={
-            "loss": f"{step_loss:.4f}",
+            "loss":      f"{step_loss:.4f}",
             "grad_norm": f"{grad_norm:.3f}",
-            "lr": f"{cur_lr:.2e}",
-            "epoch": f"{epoch + 1}/{num_epochs}",
+            "lr":        f"{cur_lr:.2e}",
+            "epoch":     f"{(global_step / max_steps * num_epochs):.3f}",
         })
 
         if global_step % eval_every == 0:
@@ -262,6 +262,9 @@ def main():
 
     rank, local_rank, world_size = setup_ddp()
     torch.manual_seed(cfg.get("seed", 42) + rank)
+
+    print(f"[rank={rank}] local_rank={local_rank} world_size={world_size} "
+          f"device=cuda:{local_rank} ({torch.cuda.get_device_name(local_rank)})")
 
     if rank == 0:
         Path(cfg["ckpt_dir"]).mkdir(parents=True, exist_ok=True)
