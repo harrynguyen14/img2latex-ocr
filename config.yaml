@@ -11,7 +11,7 @@ model:
   num_layers: 12
   mlp_ratio: 4
   dropout: 0.1
-  bridge_out_dim: 2048
+  bridge_out_dim: 1536
   lora_rank: 64
   lora_alpha: 128
   lora_dropout: 0.05
