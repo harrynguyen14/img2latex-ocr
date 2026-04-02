@@ -1,6 +1,11 @@
 import argparse
+import os
 import torch
 from pathlib import Path
+
+# Force accelerate không dispatch batches từ main process
+# Cần thiết cho IterableDataset với variable-width images (NaViT)
+os.environ.setdefault("ACCELERATE_DISPATCH_BATCHES", "false")
 
 from transformers import TrainingArguments
 
@@ -132,9 +137,6 @@ def run_stage(
 
     num_samples = train_ds.num_samples or cfg.get("num_samples", 659658)
     training_args = build_training_args(cfg, output_dir, lr, num_epochs, num_samples)
-    # IterableDataset với variable-width images: mỗi GPU phải tự fetch batch riêng
-    if hasattr(training_args, 'dispatch_batches'):
-        training_args.dispatch_batches = False
     collator = LaTeXDataCollator()
     compute_metrics = make_compute_metrics(tokenizer)
 
