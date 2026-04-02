@@ -158,7 +158,7 @@ def _pack_images(pixel_values: torch.Tensor, patch_mask: torch.Tensor, encoder: 
             valid = patch_mask[i].bool()
             patch_emb = patch_emb[valid]
 
-        cls = encoder.cls_token.unsqueeze(0).to(patch_emb.dtype)
+        cls = encoder.cls_token.to(patch_emb.dtype)
         seq = torch.cat([cls, patch_emb], dim=0)
         token_seqs.append(seq)
         patch_lengths.append(seq.shape[0])
