@@ -3,7 +3,6 @@ import torch
 from pathlib import Path
 
 from transformers import TrainingArguments
-from accelerate import DataLoaderConfiguration
 
 from preprocess import LaTeXDataset, get_tokenizer
 from modeling_latex_ocr import LaTeXOCRConfig, LaTeXOCRModel
@@ -94,7 +93,6 @@ def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int, 
         remove_unused_columns=False,   # giữ pixel_values, patch_mask
         seed=cfg.get("seed", 42),
         label_names=["labels"],
-        dataloader_config=DataLoaderConfiguration(dispatch_batches=False),
     )
 
 
@@ -134,6 +132,9 @@ def run_stage(
 
     num_samples = train_ds.num_samples or cfg.get("num_samples", 659658)
     training_args = build_training_args(cfg, output_dir, lr, num_epochs, num_samples)
+    # IterableDataset với variable-width images: mỗi GPU phải tự fetch batch riêng
+    if hasattr(training_args, 'dispatch_batches'):
+        training_args.dispatch_batches = False
     collator = LaTeXDataCollator()
     compute_metrics = make_compute_metrics(tokenizer)
 
