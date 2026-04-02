@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from constants import (
     PATCH_SIZE, IMAGE_HEIGHT, MAX_IMAGE_WIDTH,
@@ -80,7 +81,8 @@ class NaViTEncoder(nn.Module):
     def forward(self, packed_sequences: torch.Tensor, sequence_attention_mask: torch.Tensor):
         x = self.dropout(packed_sequences)
         for block in self.blocks:
-            x = block(x, attn_mask=sequence_attention_mask)
+            # Gradient checkpointing: recompute activations during backward instead of storing
+            x = checkpoint(block, x, sequence_attention_mask, use_reentrant=False)
         return self.norm(x)
 
 
