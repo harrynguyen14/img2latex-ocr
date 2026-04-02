@@ -41,19 +41,46 @@ def _decode_image(raw) -> Image.Image:
     return raw
 
 
+def _process(sample: dict, tokenizer) -> dict:
+    img    = _resize(_decode_image(sample["image"]).convert("RGB"))
+    tensor = _to_tensor(img)
+
+    enc = tokenizer(
+        sample["label"],
+        max_length=MAX_TOKEN_LEN,
+        truncation=True,
+        padding="max_length",
+        return_tensors="pt",
+    )
+    input_ids      = enc["input_ids"].squeeze(0)
+    attention_mask = enc["attention_mask"].squeeze(0)
+    labels         = input_ids.clone()
+    labels[attention_mask == 0] = -100
+
+    return {
+        "pixel_values":   tensor,
+        "input_ids":      input_ids,
+        "attention_mask": attention_mask,
+        "labels":         labels,
+    }
+
+
 class LaTeXDataset(IterableDataset):
-    def __init__(self, data_path: str, split: str, tokenizer):
+    def __init__(self, data_path: str, split: str, tokenizer,
+                 rank: int = 0, world_size: int = 1):
         from datasets import load_dataset
         from pathlib import Path
 
-        self.tokenizer = tokenizer
-        self.split = split
+        self.tokenizer  = tokenizer
+        self.split      = split
+        self.rank       = rank
+        self.world_size = world_size
 
         p = Path(data_path)
         if p.exists():
             import pyarrow.parquet as pq
             files = sorted(p.glob(f"{split}-*.parquet"))
-            self.ds = load_dataset(
+            ds    = load_dataset(
                 "parquet",
                 data_files={split: [str(f) for f in files]},
                 split=split,
@@ -61,7 +88,7 @@ class LaTeXDataset(IterableDataset):
             )
             self.num_samples = sum(pq.read_metadata(f).num_rows for f in files)
         else:
-            self.ds = load_dataset(data_path, split=split, streaming=True)
+            ds = load_dataset(data_path, split=split, streaming=True)
             try:
                 from datasets import load_dataset_builder
                 builder = load_dataset_builder(data_path)
@@ -70,39 +97,9 @@ class LaTeXDataset(IterableDataset):
             except Exception:
                 self.num_samples = None
 
+        # Shard tại HF dataset level — mỗi rank chỉ đọc phần của mình
+        self.ds = ds.skip(rank).take_every(world_size) if world_size > 1 else ds
+
     def __iter__(self):
         for sample in self.ds:
-            img = _resize(_decode_image(sample["image"]).convert("RGB"))
-            tensor = _to_tensor(img)
-
-            enc = self.tokenizer(
-                sample["label"],
-                max_length=MAX_TOKEN_LEN,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            input_ids = enc["input_ids"].squeeze(0)
-            attention_mask = enc["attention_mask"].squeeze(0)
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = -100
-
-            yield {
-                "pixel_values": tensor,
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels,
-            }
-
-
-class IterableDatasetShard(IterableDataset):
-    def __init__(self, dataset: IterableDataset, num_processes: int, process_index: int):
-        self.dataset = dataset
-        self.num_processes = num_processes
-        self.process_index = process_index
-        self.num_samples = getattr(dataset, "num_samples", None)
-
-    def __iter__(self):
-        for i, sample in enumerate(self.dataset):
-            if i % self.num_processes == self.process_index:
-                yield sample
+            yield _process(sample, self.tokenizer)

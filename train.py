@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 
 from constants import TOKENIZER_NAME
-from dataset import LaTeXDataset, IterableDatasetShard, get_tokenizer
+from dataset import LaTeXDataset, get_tokenizer
 from collator import LaTeXDataCollator
 from modeling import LaTeXOCRModel
 from evaluate import compute_metrics, print_metrics
@@ -50,10 +50,9 @@ def cleanup_ddp():
 
 def build_loader(data_path: str, split: str, tokenizer, cfg: dict,
                  rank: int, world_size: int) -> DataLoader:
-    ds    = LaTeXDataset(data_path, split, tokenizer)
-    shard = IterableDatasetShard(ds, num_processes=world_size, process_index=rank)
+    ds = LaTeXDataset(data_path, split, tokenizer, rank=rank, world_size=world_size)
     return DataLoader(
-        shard,
+        ds,
         batch_size=cfg["batch_size"],
         collate_fn=LaTeXDataCollator(),
         num_workers=cfg["num_workers"],
@@ -208,13 +207,16 @@ def run_stage(stage: int, cfg: dict, data_path: str,
         step_loss    = accum_loss
         accum_loss   = 0.0
 
+        cur_epoch = global_step / max_steps * num_epochs
         pbar.update(1)
-        pbar.set_postfix(ordered_dict={
-            "loss":      f"{step_loss:.4f}",
-            "grad_norm": f"{grad_norm:.3f}",
-            "lr":        f"{cur_lr:.2e}",
-            "epoch":     f"{(global_step / max_steps * num_epochs):.3f}",
-        })
+        if is_master:
+            tqdm.write(
+                f"[{global_step}/{max_steps}]"
+                f"  epoch={cur_epoch:.3f}"
+                f"  loss={step_loss:.4f}"
+                f"  grad_norm={grad_norm:.3f}"
+                f"  lr={cur_lr:.2e}"
+            )
 
         if global_step % eval_every == 0:
             max_eval = cfg.get("eval_samples", 200) // cfg["batch_size"]
