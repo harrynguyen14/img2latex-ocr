@@ -26,12 +26,11 @@ class LaTeXOCRModel(nn.Module):
             dropout=cfg["dropout"],
         )
         bridge = BridgeMLP(in_dim=cfg["embed_dim"], out_dim=cfg["bridge_out_dim"])
-        self.visual_encoder = VisualEncoder(navit, bridge).to(torch.float16)
+        self.visual_encoder = VisualEncoder(navit, bridge)
 
         self.decoder = AutoModelForCausalLM.from_pretrained(
             cfg["tokenizer_name"],
             trust_remote_code=True,
-            dtype=torch.float16,
         )
         if cfg.get("use_lora", False):
             lora = LoraConfig(
@@ -62,7 +61,6 @@ class LaTeXOCRModel(nn.Module):
 
     def forward(self, pixel_values, patch_mask=None, input_ids=None,
                 attention_mask=None, labels=None):
-        pixel_values = pixel_values.to(dtype=torch.float16)
         visual_tokens, vis_mask = self.visual_encoder(pixel_values, patch_mask)
         token_embeds   = self.decoder.get_input_embeddings()(input_ids)
         inputs_embeds  = torch.cat([visual_tokens, token_embeds], dim=1)
@@ -87,7 +85,6 @@ class LaTeXOCRModel(nn.Module):
     @torch.no_grad()
     def generate(self, pixel_values, patch_mask=None, max_new_tokens=None):
         max_new_tokens = max_new_tokens or self.cfg.get("max_new_tokens", 200)
-        pixel_values   = pixel_values.to(dtype=torch.float16)
         visual_tokens, vis_mask = self.visual_encoder(pixel_values, patch_mask)
 
         B      = visual_tokens.shape[0]
