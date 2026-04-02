@@ -151,7 +151,7 @@ def run_stage(stage: int, cfg: dict, data_path: str,
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=cfg["weight_decay"])
-    scaler    = torch.cuda.amp.GradScaler()
+    scaler    = torch.amp.GradScaler("cuda")
 
     global_step  = 0
     best_bleu    = -1.0

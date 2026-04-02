@@ -19,8 +19,8 @@ model:
 train:
   stage1_epochs: 5
   stage2_epochs: 10
-  batch_size: 8
-  grad_accum: 4
+  batch_size: 2
+  grad_accum: 16
   lr_stage1: 1.0e-4
   lr_stage2: 5.0e-5
   weight_decay: 0.01

@@ -31,7 +31,7 @@ class LaTeXOCRModel(nn.Module):
         self.decoder = AutoModelForCausalLM.from_pretrained(
             cfg["tokenizer_name"],
             trust_remote_code=True,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
         )
         if cfg.get("use_lora", False):
             lora = LoraConfig(
