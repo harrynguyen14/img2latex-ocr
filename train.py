@@ -1,69 +1,48 @@
 import argparse
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
 from pathlib import Path
-from tqdm import tqdm
+
+from transformers import TrainingArguments
 
 from preprocess import LaTeXDataset, get_tokenizer
-from encode import collate_images
-from evaluate import compute_metrics
 from modeling_latex_ocr import LaTeXOCRConfig, LaTeXOCRModel
+from trainer import LaTeXOCRTrainer, LaTeXDataCollator, StageCallback, make_compute_metrics
 from utils import load_yaml, get_device
-
-
-
-def merge_args(cfg: dict, args: argparse.Namespace) -> dict:
-    overrides = {k: v for k, v in vars(args).items() if v is not None and k != "config"}
-    flat = {k: v for section in cfg.values() if isinstance(section, dict) for k, v in section.items()}
-    flat.update(overrides)
-    return flat
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train NaViT + Qwen2.5-Coder LaTeX OCR")
     parser.add_argument("--config", type=str, default="config.yaml")
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="HF repo id hoặc local Parquet folder (vd: harryrobert/latex-ocr)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path checkpoint để resume (vd: checkpoints/checkpoint-1000)")
+    parser.add_argument("--only_stage", type=int, choices=[1, 2], default=None)
 
-    parser.add_argument("--max_token_len", type=int)
-
-    parser.add_argument("--tokenizer_name", type=str)
-    parser.add_argument("--embed_dim", type=int)
-    parser.add_argument("--num_heads", type=int)
-    parser.add_argument("--num_layers", type=int)
-    parser.add_argument("--lora_rank", type=int)
-    parser.add_argument("--lora_alpha", type=int)
-    parser.add_argument("--load_in_8bit", action="store_true", default=None)
-
-    parser.add_argument("--stage1_epochs", type=int)
-    parser.add_argument("--stage2_epochs", type=int)
+    # Override config từ CLI
     parser.add_argument("--batch_size", type=int)
-    parser.add_argument("--grad_accum", type=int)
     parser.add_argument("--lr_stage1", type=float)
     parser.add_argument("--lr_stage2", type=float)
-    parser.add_argument("--weight_decay", type=float)
-    parser.add_argument("--max_grad_norm", type=float)
-    parser.add_argument("--eval_every", type=int)
-    parser.add_argument("--save_every", type=int)
+    parser.add_argument("--stage1_epochs", type=int)
+    parser.add_argument("--stage2_epochs", type=int)
+    parser.add_argument("--grad_accum", type=int)
+    parser.add_argument("--eval_steps", type=int)
+    parser.add_argument("--save_steps", type=int)
     parser.add_argument("--eval_samples", type=int)
     parser.add_argument("--num_workers", type=int)
     parser.add_argument("--seed", type=int)
-
     parser.add_argument("--ckpt_dir", type=str)
-    parser.add_argument("--only_stage", type=int, choices=[1, 2], default=None)
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Tên folder checkpoint để resume (vd: checkpoint-1000)")
-    parser.add_argument("--aug_manifest_stage1", type=str, required=True)
-    parser.add_argument("--aug_manifest_stage2", type=str, required=True)
-    parser.add_argument("--val_manifest", type=str, default=None)
-
     return parser.parse_args()
 
 
-DEVICE = get_device()
+def merge_args(cfg: dict, args: argparse.Namespace) -> dict:
+    overrides = {k: v for k, v in vars(args).items() if v is not None and k not in ("config", "data_path", "resume", "only_stage")}
+    flat = {k: v for section in cfg.values() if isinstance(section, dict) for k, v in section.items()}
+    flat.update(overrides)
+    return flat
 
 
-def build_ocr_config(cfg: dict, use_lora: bool = False) -> LaTeXOCRConfig:
+def build_model_config(cfg: dict, use_lora: bool) -> LaTeXOCRConfig:
     return LaTeXOCRConfig(
         patch_size=cfg["patch_size"],
         image_height=cfg["image_height"],
@@ -84,127 +63,107 @@ def build_ocr_config(cfg: dict, use_lora: bool = False) -> LaTeXOCRConfig:
     )
 
 
-def collate_fn(batch, device):
-    images = [s["image"] for s in batch]
-    input_ids = torch.stack([s["input_ids"] for s in batch])
-    attention_mask = torch.stack([s["attention_mask"] for s in batch])
-    labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
-    pixel_values, patch_mask = collate_images(images, device=device)
-    return {
-        "pixel_values": pixel_values,
-        "patch_mask": patch_mask,
-        "input_ids": input_ids.to(device),
-        "attention_mask": attention_mask.to(device),
-        "labels": labels.to(device),
-        "raw_labels": [s["label"] for s in batch],
-    }
-
-
-def make_loader(dataset, cfg, shuffle=True):
-    return DataLoader(
-        dataset,
-        batch_size=cfg["batch_size"],
-        shuffle=shuffle,
-        num_workers=cfg["num_workers"],
-        pin_memory=True,
-        collate_fn=lambda b: collate_fn(b, DEVICE),
+def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int) -> TrainingArguments:
+    return TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=cfg["batch_size"],
+        per_device_eval_batch_size=cfg["batch_size"],
+        gradient_accumulation_steps=cfg["grad_accum"],
+        learning_rate=lr,
+        weight_decay=cfg["weight_decay"],
+        max_grad_norm=cfg["max_grad_norm"],
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.05,
+        fp16=torch.cuda.is_available(),
+        eval_strategy="steps",
+        eval_steps=cfg["eval_steps"],
+        save_strategy="steps",
+        save_steps=cfg["save_steps"],
+        save_total_limit=3,
+        load_best_model_at_end=True,
+        metric_for_best_model="bleu4",
+        greater_is_better=True,
+        logging_steps=50,
+        report_to=cfg.get("report_to", "tensorboard"),
+        dataloader_num_workers=cfg["num_workers"],
+        remove_unused_columns=False,   # giữ pixel_values, patch_mask, raw_labels
+        seed=cfg.get("seed", 42),
+        predict_with_generate=False,   # prediction_step tự xử lý generate
+        label_names=["labels"],
     )
 
 
-def run_eval(model: LaTeXOCRModel, val_loader, n_samples):
-    model.eval()
-    preds, refs, count = [], [], 0
-    with torch.no_grad():
-        for batch in val_loader:
-            generated = model.generate(batch["pixel_values"], batch["patch_mask"])
-            preds.extend(generated)
-            refs.extend(batch["raw_labels"])
-            count += len(generated)
-            if count >= n_samples:
-                break
-    return compute_metrics(preds, refs)
+def run_stage(
+    stage: int,
+    cfg: dict,
+    data_path: str,
+    tokenizer,
+    resume: str = None,
+):
+    use_lora = (stage == 2)
+    stage_name = f"stage{stage}"
+    output_dir = str(Path(cfg["ckpt_dir"]) / stage_name)
 
+    lr = cfg["lr_stage1"] if stage == 1 else cfg["lr_stage2"]
+    num_epochs = cfg["stage1_epochs"] if stage == 1 else cfg["stage2_epochs"]
 
-def train_stage(model: LaTeXOCRModel, train_loader, val_loader, optimizer, scheduler, cfg, stage_name, start_step=0):
-    scaler = GradScaler("cuda")
-    step = start_step
-    best_bleu = 0.0
-    epochs = cfg[f"{stage_name}_epochs"]
-    ckpt_dir = Path(cfg["ckpt_dir"])
-    merge_lora = stage_name == "stage2"
+    model_cfg = build_model_config(cfg, use_lora=use_lora)
+    model = LaTeXOCRModel(model_cfg).to(get_device())
 
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0.0
-        optimizer.zero_grad()
+    # Load weights từ stage trước hoặc resume
+    if stage == 2:
+        stage1_dir = Path(cfg["ckpt_dir"]) / "stage1"
+        best_stage1 = stage1_dir / "best_model" if (stage1_dir / "best_model").exists() else stage1_dir
+        if best_stage1.exists():
+            loaded, _ = LaTeXOCRModel.from_checkpoint(str(best_stage1), device=get_device())
+            model.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
+            print(f"Loaded stage1 weights from {best_stage1}")
 
-        pbar = tqdm(train_loader, desc=f"[{stage_name}] Epoch {epoch+1}/{epochs}")
-        for i, batch in enumerate(pbar):
-            with autocast("cuda"):
-                out = model(
-                    batch["pixel_values"],
-                    batch["patch_mask"],
-                    batch["input_ids"],
-                    batch["attention_mask"],
-                    batch["labels"],
-                )
-                loss = out.loss / cfg["grad_accum"]
+    if resume:
+        loaded, _ = LaTeXOCRModel.from_checkpoint(resume, device=get_device())
+        model.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
+        print(f"Resumed from {resume}")
 
-            scaler.scale(loss).backward()
+    train_ds = LaTeXDataset(data_path, stage_name, tokenizer)
+    val_ds   = LaTeXDataset(data_path, "validation", tokenizer)
 
-            if (i + 1) % cfg["grad_accum"] == 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad],
-                    cfg["max_grad_norm"],
-                )
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                if scheduler:
-                    scheduler.step()
-                step += 1
+    training_args = build_training_args(cfg, output_dir, lr, num_epochs)
+    collator = LaTeXDataCollator()
+    compute_metrics = make_compute_metrics(tokenizer)
 
-            total_loss += loss.item() * cfg["grad_accum"]
-            pbar.set_postfix({"loss": f"{loss.item() * cfg['grad_accum']:.4f}", "step": step})
+    # Stage 1: freeze decoder từ epoch 0 → unfreeze không cần
+    # Stage 2: LoRA đã được bật khi use_lora=True, không cần callback freeze/unfreeze
+    callbacks = []
+    if stage == 1:
+        from transformers import TrainerCallback
 
-            if step > 0 and step % cfg["eval_every"] == 0 and val_loader:
-                metrics = run_eval(model, val_loader, cfg["eval_samples"])
-                print(f"\n[Eval step {step}] BLEU4={metrics['bleu4']:.4f}  ExactMatch={metrics['exact_match']:.4f}  EditDist={metrics['edit_distance']:.4f}")
+        class FreezeDecoderCallback(TrainerCallback):
+            def on_train_begin(self, args, state, control, model=None, **kwargs):
+                model.freeze_decoder()
+                print("[Stage 1] Decoder frozen.")
 
-                if metrics["bleu4"] > best_bleu:
-                    best_bleu = metrics["bleu4"]
-                    model.save_checkpoint(
-                        ckpt_dir / f"best_{stage_name}",
-                        step=step,
-                        optimizer=optimizer,
-                        metrics=metrics,
-                        merge_lora=False,
-                    )
-                model.train()
+        callbacks.append(FreezeDecoderCallback())
 
-            if step > 0 and step % cfg["save_every"] == 0:
-                model.save_checkpoint(
-                    ckpt_dir / f"checkpoint-{step}",
-                    step=step,
-                    optimizer=optimizer,
-                    metrics={},
-                    merge_lora=False,
-                )
-
-        avg_loss = total_loss / len(train_loader)
-        print(f"[{stage_name}] Epoch {epoch+1} avg_loss={avg_loss:.4f}")
-
-    model.save_checkpoint(
-        ckpt_dir / f"{stage_name}_final",
-        step=step,
-        optimizer=optimizer,
-        metrics={"best_bleu": best_bleu},
-        merge_lora=merge_lora,
+    trainer = LaTeXOCRTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        data_collator=collator,
+        compute_metrics=compute_metrics,
+        callbacks=callbacks,
     )
 
-    return step
+    trainer.train(resume_from_checkpoint=resume if resume else None)
+
+    # Lưu best model theo chuẩn HF
+    best_dir = Path(output_dir) / "best_model"
+    trainer.save_model(str(best_dir))
+    tokenizer.save_pretrained(str(best_dir))
+    print(f"[Stage {stage}] Best model saved to {best_dir}")
+
+    return trainer
 
 
 def main():
@@ -213,69 +172,18 @@ def main():
     cfg = merge_args(cfg_raw, args)
 
     torch.manual_seed(cfg.get("seed", 42))
-    ckpt_dir = Path(cfg["ckpt_dir"])
-    ckpt_dir.mkdir(exist_ok=True)
+    Path(cfg["ckpt_dir"]).mkdir(exist_ok=True)
 
     tokenizer = get_tokenizer()
-
     only_stage = args.only_stage
 
     if only_stage in (None, 1):
         print("\n=== STAGE 1: Freeze decoder, train encoder + bridge ===")
-
-        ocr_config = build_ocr_config(cfg, use_lora=False)
-        model = LaTeXOCRModel(ocr_config).to(DEVICE)
-        model.freeze_decoder()
-
-        start_step = 0
-        if args.resume:
-            resume_dir = ckpt_dir / args.resume
-            loaded, trainer_state = LaTeXOCRModel.from_checkpoint(str(resume_dir), device=DEVICE)
-            model.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
-            start_step = trainer_state.get("step", 0)
-
-        train_ds = LaTeXDataset(args.aug_manifest_stage1, tokenizer)
-        val_ds = LaTeXDataset(args.val_manifest, tokenizer) if args.val_manifest else None
-        train_loader = make_loader(train_ds, cfg)
-        val_loader = make_loader(val_ds, cfg, shuffle=False) if val_ds else None
-
-        opt1 = torch.optim.AdamW(model.stage1_params(), lr=cfg["lr_stage1"], weight_decay=cfg["weight_decay"])
-        if args.resume:
-            model.load_optimizer(str(ckpt_dir / args.resume), opt1)
-        sch1 = torch.optim.lr_scheduler.CosineAnnealingLR(opt1, T_max=cfg["stage1_epochs"] * len(train_loader) // cfg["grad_accum"])
-        step = train_stage(model, train_loader, val_loader, opt1, sch1, cfg, "stage1", start_step)
+        run_stage(1, cfg, args.data_path, tokenizer, resume=args.resume if args.only_stage == 1 else None)
 
     if only_stage in (None, 2):
-        print("\n=== STAGE 2: Unfreeze decoder với LoRA ===")
-
-        ocr_config2 = build_ocr_config(cfg, use_lora=True)
-        model2 = LaTeXOCRModel(ocr_config2).to(DEVICE)
-
-        start_step = 0
-        stage1_dir = ckpt_dir / "stage1_final"
-        if stage1_dir.exists():
-            loaded, trainer_state = LaTeXOCRModel.from_checkpoint(str(stage1_dir), device=DEVICE)
-            model2.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
-            start_step = trainer_state.get("step", 0)
-            print(f"Loaded stage1 weights (step={start_step})")
-
-        if args.resume and only_stage == 2:
-            resume_dir = ckpt_dir / args.resume
-            loaded, trainer_state = LaTeXOCRModel.from_checkpoint(str(resume_dir), device=DEVICE)
-            model2.visual_encoder.load_state_dict(loaded.visual_encoder.state_dict())
-            start_step = trainer_state.get("step", 0)
-
-        train_ds2 = LaTeXDataset(args.aug_manifest_stage2, tokenizer)
-        val_ds2 = LaTeXDataset(args.val_manifest, tokenizer) if args.val_manifest else None
-        train_loader2 = make_loader(train_ds2, cfg)
-        val_loader2 = make_loader(val_ds2, cfg, shuffle=False) if val_ds2 else None
-
-        opt2 = torch.optim.AdamW(model2.stage2_params(), lr=cfg["lr_stage2"], weight_decay=cfg["weight_decay"])
-        if args.resume and only_stage == 2:
-            model2.load_optimizer(str(ckpt_dir / args.resume), opt2)
-
-        sch2 = torch.optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=cfg["stage2_epochs"] * len(train_loader2) // cfg["grad_accum"])
-        train_stage(model2, train_loader2, val_loader2, opt2, sch2, cfg, "stage2", start_step)
+        print("\n=== STAGE 2: Train encoder + bridge + LoRA decoder ===")
+        run_stage(2, cfg, args.data_path, tokenizer, resume=args.resume if args.only_stage == 2 else None)
 
     print("Done.")
 

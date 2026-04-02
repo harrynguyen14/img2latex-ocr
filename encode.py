@@ -6,6 +6,7 @@ from PIL import Image
 
 PATCH_SIZE = 16
 IMAGE_HEIGHT = 64
+MAX_IMAGE_WIDTH = 672
 EMBED_DIM = 768
 BRIDGE_OUT_DIM = 2048
 NUM_HEADS = 12
@@ -63,12 +64,12 @@ class NaViTEncoder(nn.Module):
         self,
         patch_size=PATCH_SIZE,
         image_height=IMAGE_HEIGHT,
+        max_image_width=MAX_IMAGE_WIDTH,
         embed_dim=EMBED_DIM,
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         mlp_ratio=MLP_RATIO,
         dropout=DROPOUT,
-        max_seq_len=2048,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -76,7 +77,7 @@ class NaViTEncoder(nn.Module):
         self.num_heads = num_heads
         self.patch_embed = PatchEmbedding(patch_size, 3, embed_dim)
         self.row_embed = nn.Embedding(image_height // patch_size + 1, embed_dim // 2)
-        self.col_embed = nn.Embedding(max_seq_len, embed_dim // 2)
+        self.col_embed = nn.Embedding(max_image_width // patch_size + 1, embed_dim // 2)
         self.cls_token = nn.Parameter(torch.zeros(1, embed_dim))
         self.dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([

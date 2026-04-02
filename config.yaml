@@ -1,10 +1,4 @@
 data:
-  data_dir: "data"
-  linxy_configs:
-    - "full"
-    - "synthetic_handwrite"
-    - "human_handwrite"
-  oleehyo_config: "cleaned_formulas"
   max_token_len: 200
   image_height: 64
   max_image_width: 672
@@ -21,7 +15,6 @@ model:
   lora_rank: 64
   lora_alpha: 128
   lora_dropout: 0.05
-  load_in_8bit: false
 
 train:
   stage1_epochs: 5
@@ -32,13 +25,12 @@ train:
   lr_stage2: 5.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0
-  eval_every: 1000
-  save_every: 2000
+  eval_steps: 1000       # tương đương eval_every cũ
+  save_steps: 2000       # tương đương save_every cũ
   eval_samples: 200
   num_workers: 2
   seed: 42
+  report_to: "tensorboard"   # hoặc "wandb"
 
 paths:
   ckpt_dir: "checkpoints"
-  stage1_ckpt: "stage1_final.pt"
-  stage2_ckpt: "stage2_final.pt"

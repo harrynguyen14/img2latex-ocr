@@ -4,22 +4,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from preprocess import LaTeXDataset, get_tokenizer
-from encode import collate_images
+from trainer import LaTeXDataCollator
 from modeling_latex_ocr import LaTeXOCRModel
 from evaluate import compute_metrics, print_metrics
 from utils import get_device
 
 DEVICE = get_device()
-
-
-def collate_fn(batch, device):
-    images = [s["image"] for s in batch]
-    pixel_values, patch_mask = collate_images(images, device=device)
-    return {
-        "pixel_values": pixel_values,
-        "patch_mask": patch_mask,
-        "raw_labels": [s["label"] for s in batch],
-    }
 
 
 def load_model(checkpoint_dir: str) -> LaTeXOCRModel:
@@ -33,7 +23,9 @@ def run_test(model, test_loader, output_file: str = None):
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
-            preds = model.generate(batch["pixel_values"], batch["patch_mask"])
+            pv = batch["pixel_values"].to(DEVICE)
+            pm = batch["patch_mask"].to(DEVICE)
+            preds = model.generate(pv, pm)
             all_preds.extend(preds)
             all_refs.extend(batch["raw_labels"])
 
@@ -54,8 +46,10 @@ def run_test(model, test_loader, output_file: str = None):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_stage2")
-    parser.add_argument("--manifest", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/stage2/best_model")
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="HF repo id hoặc local Parquet folder")
+    parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--output", type=str, default="test_results.txt")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=2)
@@ -66,13 +60,13 @@ def main():
     args = parse_args()
     tokenizer = get_tokenizer()
 
-    dataset = LaTeXDataset(args.manifest, tokenizer)
+    dataset = LaTeXDataset(args.data_path, args.split, tokenizer)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=lambda b: collate_fn(b, DEVICE),
+        collate_fn=LaTeXDataCollator(),
     )
 
     model = load_model(args.checkpoint)

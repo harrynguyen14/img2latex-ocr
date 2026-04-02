@@ -58,18 +58,19 @@ class LaTeXOCRModel(PreTrainedModel):
     config_class = LaTeXOCRConfig
     base_model_prefix = "latex_ocr"
     supports_gradient_checkpointing = False
+    main_input_name = "pixel_values"
 
     def __init__(self, config: LaTeXOCRConfig):
         super().__init__(config)
         navit = NaViTEncoder(
             patch_size=config.patch_size,
             image_height=config.image_height,
+            max_image_width=config.max_image_width,
             embed_dim=config.embed_dim,
             num_heads=config.num_heads,
             num_layers=config.num_layers,
             mlp_ratio=config.mlp_ratio,
             dropout=config.encoder_dropout,
-            max_seq_len=config.max_seq_len,
         )
         bridge = BridgeMLP(in_dim=config.embed_dim, out_dim=config.bridge_out_dim)
         self.visual_encoder = VisualEncoder(navit, bridge).to(torch.float16)
@@ -140,7 +141,7 @@ class LaTeXOCRModel(PreTrainedModel):
         visual_tokens, vis_mask = self.visual_encoder(pixel_values, patch_mask)
 
         B = visual_tokens.shape[0]
-        bos_id = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
+        bos_id = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id or 0
         input_ids = torch.full((B, 1), bos_id, dtype=torch.long, device=pixel_values.device)
         token_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([visual_tokens, token_embeds], dim=1)
@@ -224,6 +225,9 @@ class LaTeXOCRModel(PreTrainedModel):
 
         model.eval()
         return model.to(device), trainer_state
+
+    def can_generate(self) -> bool:
+        return True
 
     def load_optimizer(self, checkpoint_dir: str, optimizer):
         opt_path = Path(checkpoint_dir) / "optimizer.pt"

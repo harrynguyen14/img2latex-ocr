@@ -11,7 +11,8 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     parser.add_argument("--repo_id", type=str, required=True, help="HuggingFace repo: username/model-name")
     parser.add_argument("--save_dir", type=str, default="hf_export")
-    parser.add_argument("--merge_lora", action="store_true", default=True)
+    parser.add_argument("--no_merge_lora", action="store_true", default=False,
+                        help="Không merge LoRA weights trước khi upload (mặc định: merge)")
     parser.add_argument("--private", action="store_true", default=False)
     parser.add_argument("--token", type=str, default=None, help="HF token (hoặc set HF_TOKEN env)")
     return parser.parse_args()
@@ -27,7 +28,7 @@ def main():
     model, _ = LaTeXOCRModel.from_checkpoint(args.checkpoint, device="cpu")
 
     print(f"Exporting to: {args.save_dir}")
-    model.save_checkpoint(args.save_dir, step=0, merge_lora=args.merge_lora)
+    model.save_checkpoint(args.save_dir, step=0, merge_lora=not args.no_merge_lora)
 
     print(f"Uploading to HuggingFace: {args.repo_id}")
     api = HfApi()

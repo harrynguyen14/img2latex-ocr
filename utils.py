@@ -34,7 +34,7 @@ def resize_image(img: Image.Image) -> Image.Image:
     new_w = min(new_w, MAX_IMAGE_WIDTH)
     new_w = (new_w // PATCH_SIZE) * PATCH_SIZE
     new_w = max(new_w, PATCH_SIZE)
-    return img.resize((new_w, IMAGE_HEIGHT), Image.BICUBIC)
+    return img.resize((new_w, IMAGE_HEIGHT), Image.LANCZOS)
 
 
 def collate_images(images: list, device: str = "cpu"):
