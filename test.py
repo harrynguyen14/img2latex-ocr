@@ -1,5 +1,6 @@
 import torch
 import argparse
+import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -27,7 +28,10 @@ def run_test(model, test_loader, output_file: str = None):
             pm = batch["patch_mask"].to(DEVICE)
             preds = model.generate(pv, pm)
             all_preds.extend(preds)
-            all_refs.extend(batch["raw_labels"])
+            ref_ids = batch["labels"].cpu().numpy()
+            ref_ids = np.where(ref_ids == -100, model.tokenizer.pad_token_id, ref_ids)
+            ref_strs = model.tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
+            all_refs.extend(ref_strs)
 
     metrics = compute_metrics(all_preds, all_refs)
     print_metrics(metrics, prefix="Test")

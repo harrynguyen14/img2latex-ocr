@@ -125,7 +125,7 @@ class LaTeXOCRModel(PreTrainedModel):
         inputs_embeds = torch.cat([visual_tokens, token_embeds], dim=1)
 
         B, vis_len, _ = visual_tokens.shape
-        full_mask = torch.cat([vis_mask.to(attention_mask.dtype), attention_mask], dim=1)
+        full_mask = torch.cat([vis_mask.to(device=attention_mask.device, dtype=attention_mask.dtype), attention_mask], dim=1)
 
         if labels is not None:
             ignore = torch.full((B, vis_len), -100, dtype=labels.dtype, device=labels.device)

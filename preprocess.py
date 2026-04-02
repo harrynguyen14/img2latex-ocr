@@ -110,7 +110,6 @@ class LaTeXDataset(IterableDataset):
                 "input_ids": input_ids,           # (L,)
                 "attention_mask": attention_mask, # (L,)
                 "labels": labels,                 # (L,) với -100 ở padding
-                "label": label,                   # raw string cho compute_metrics
             }
 
 

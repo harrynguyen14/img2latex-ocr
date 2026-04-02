@@ -90,7 +90,7 @@ def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int, 
         logging_steps=50,
         report_to=cfg.get("report_to", "tensorboard"),
         dataloader_num_workers=cfg["num_workers"],
-        remove_unused_columns=False,   # giữ pixel_values, patch_mask, raw_labels
+        remove_unused_columns=False,   # giữ pixel_values, patch_mask
         seed=cfg.get("seed", 42),
         label_names=["labels"],
     )
