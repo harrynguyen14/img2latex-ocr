@@ -28,7 +28,7 @@ train:
   eval_steps: 1000       # tương đương eval_every cũ
   save_steps: 2000       # tương đương save_every cũ
   eval_samples: 200
-  num_workers: 2
+  num_workers: 4
   seed: 42
   report_to: "tensorboard"   # hoặc "wandb"
 

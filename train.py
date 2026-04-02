@@ -36,9 +36,9 @@ def get_lr(step: int, max_steps: int, lr: float, warmup_steps: int) -> float:
 
 
 def setup_ddp():
-    dist.init_process_group(backend="nccl")
-    rank       = dist.get_rank()
     local_rank = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
+    rank       = dist.get_rank()
     world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     return rank, local_rank, world_size
@@ -58,6 +58,8 @@ def build_loader(data_path: str, split: str, tokenizer, cfg: dict,
         collate_fn=LaTeXDataCollator(),
         num_workers=cfg["num_workers"],
         pin_memory=True,
+        prefetch_factor=4 if cfg["num_workers"] > 0 else None,
+        persistent_workers=cfg["num_workers"] > 0,
     ), ds.num_samples
 
 
@@ -158,15 +160,20 @@ def run_stage(stage: int, cfg: dict, data_path: str,
     grad_accum   = cfg["grad_accum"]
     micro_step   = 0
     accum_loss   = 0.0
+    epoch        = 0
 
     data_iter = iter(train_loader)
-    pbar = tqdm(total=max_steps, desc=f"Stage {stage}", disable=not is_master)
+    pbar = tqdm(total=max_steps, desc=f"Stage {stage} Epoch 1/{num_epochs}",
+                disable=not is_master, dynamic_ncols=True)
 
     while global_step < max_steps:
         try:
             batch = next(data_iter)
         except StopIteration:
+            epoch    += 1
             data_iter = iter(train_loader)
+            if is_master:
+                pbar.set_description(f"Stage {stage} Epoch {epoch + 1}/{num_epochs}")
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -191,7 +198,7 @@ def run_stage(stage: int, cfg: dict, data_path: str,
             pg["lr"] = cur_lr
 
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(trainable, cfg["max_grad_norm"])
+        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg["max_grad_norm"])
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
@@ -202,7 +209,12 @@ def run_stage(stage: int, cfg: dict, data_path: str,
         accum_loss   = 0.0
 
         pbar.update(1)
-        pbar.set_postfix(loss=f"{step_loss:.4f}", lr=f"{cur_lr:.2e}")
+        pbar.set_postfix(ordered_dict={
+            "loss": f"{step_loss:.4f}",
+            "grad_norm": f"{grad_norm:.3f}",
+            "lr": f"{cur_lr:.2e}",
+            "epoch": f"{epoch + 1}/{num_epochs}",
+        })
 
         if global_step % eval_every == 0:
             max_eval = cfg.get("eval_samples", 200) // cfg["batch_size"]
@@ -225,6 +237,8 @@ def run_stage(stage: int, cfg: dict, data_path: str,
                 step=global_step, optimizer=optimizer,
             )
         dist.barrier()
+
+    pbar.close()
 
     if is_master:
         raw.save_checkpoint(str(ckpt_dir / "final"), step=global_step, optimizer=optimizer)

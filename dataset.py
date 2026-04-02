@@ -103,6 +103,17 @@ class IterableDatasetShard(IterableDataset):
         self.num_samples = getattr(dataset, "num_samples", None)
 
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_id   = worker_info.id
+            num_workers = worker_info.num_workers
+        else:
+            worker_id   = 0
+            num_workers = 1
+
+        stride = self.num_processes * num_workers
+        start  = self.process_index * num_workers + worker_id
+
         for i, sample in enumerate(self.dataset):
-            if i % self.num_processes == self.process_index:
+            if i % stride == start:
                 yield sample
