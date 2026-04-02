@@ -1,4 +1,3 @@
-import contextlib
 import json
 import torch
 import torch.nn as nn
@@ -32,7 +31,7 @@ class LaTeXOCRModel(nn.Module):
         self.decoder = AutoModelForCausalLM.from_pretrained(
             cfg["tokenizer_name"],
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         if cfg.get("use_lora", False):
             lora = LoraConfig(
@@ -78,14 +77,11 @@ class LaTeXOCRModel(nn.Module):
             ignore      = torch.full((B, vis_len), -100, dtype=labels.dtype, device=labels.device)
             full_labels = torch.cat([ignore, labels], dim=1)
 
-        decoder_frozen = not any(p.requires_grad for p in self.decoder.parameters())
-        ctx = torch.no_grad() if decoder_frozen else contextlib.nullcontext()
-        with ctx:
-            return self.decoder(
-                inputs_embeds=inputs_embeds,
-                attention_mask=full_mask,
-                labels=full_labels,
-            )
+        return self.decoder(
+            inputs_embeds=inputs_embeds,
+            attention_mask=full_mask,
+            labels=full_labels,
+        )
 
     @torch.no_grad()
     def generate(self, pixel_values, patch_mask=None, max_new_tokens=None):
