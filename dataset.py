@@ -12,10 +12,10 @@ from constants import (
 
 
 def get_tokenizer():
-    tok = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
-    return tok
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def _resize(img: Image.Image) -> Image.Image:
