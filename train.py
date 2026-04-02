@@ -6,7 +6,7 @@ from transformers import TrainingArguments
 
 from preprocess import LaTeXDataset, get_tokenizer
 from modeling_latex_ocr import LaTeXOCRConfig, LaTeXOCRModel
-from trainer import LaTeXOCRTrainer, LaTeXDataCollator, StageCallback, make_compute_metrics
+from trainer import LaTeXOCRTrainer, LaTeXDataCollator, make_compute_metrics
 from utils import load_yaml, get_device
 
 
