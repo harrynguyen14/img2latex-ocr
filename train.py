@@ -63,10 +63,13 @@ def build_model_config(cfg: dict, use_lora: bool) -> LaTeXOCRConfig:
     )
 
 
-def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int) -> TrainingArguments:
+def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int, num_samples: int) -> TrainingArguments:
+    steps_per_epoch = num_samples // cfg["batch_size"]
+    max_steps = (steps_per_epoch * num_epochs) // cfg["grad_accum"]
+    warmup_steps = int(max_steps * 0.05)
     return TrainingArguments(
         output_dir=output_dir,
-        num_train_epochs=num_epochs,
+        max_steps=max_steps,
         per_device_train_batch_size=cfg["batch_size"],
         per_device_eval_batch_size=cfg["batch_size"],
         gradient_accumulation_steps=cfg["grad_accum"],
@@ -74,7 +77,7 @@ def build_training_args(cfg: dict, output_dir: str, lr: float, num_epochs: int) 
         weight_decay=cfg["weight_decay"],
         max_grad_norm=cfg["max_grad_norm"],
         lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
+        warmup_steps=warmup_steps,
         fp16=torch.cuda.is_available(),
         eval_strategy="steps",
         eval_steps=cfg["eval_steps"],
@@ -127,7 +130,8 @@ def run_stage(
     train_ds = LaTeXDataset(data_path, stage_name, tokenizer)
     val_ds   = LaTeXDataset(data_path, "validation", tokenizer)
 
-    training_args = build_training_args(cfg, output_dir, lr, num_epochs)
+    num_samples = train_ds.num_samples or cfg.get("num_samples", 659658)
+    training_args = build_training_args(cfg, output_dir, lr, num_epochs, num_samples)
     collator = LaTeXDataCollator()
     compute_metrics = make_compute_metrics(tokenizer)
 

@@ -63,10 +63,22 @@ class LaTeXDataset(IterableDataset):
                 split=split,
                 streaming=True,
             )
+            # Đếm rows từ Parquet metadata (không cần scan toàn bộ)
+            import pyarrow.parquet as pq
+            parquet_files = sorted(p.glob(f"{split}-*.parquet"))
+            self.num_samples = sum(pq.read_metadata(f).num_rows for f in parquet_files)
         else:
             self.ds = load_dataset(data_path, split=split, streaming=True)
+            # Lấy từ HF dataset info (không download data)
+            try:
+                from datasets import load_dataset_builder
+                builder = load_dataset_builder(data_path)
+                builder.download_and_prepare()
+                self.num_samples = builder.info.splits[split].num_examples
+            except Exception:
+                self.num_samples = None
 
-        print(f"LaTeXDataset: split={split}  source={data_path}  streaming=True")
+        print(f"LaTeXDataset: split={split}  source={data_path}  num_samples={self.num_samples}")
 
     def __iter__(self):
         for sample in self.ds:
