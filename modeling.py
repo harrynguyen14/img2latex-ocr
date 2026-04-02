@@ -55,6 +55,13 @@ class LaTeXOCRModel(nn.Module):
         if hasattr(self.decoder, "gradient_checkpointing_enable"):
             self.decoder.gradient_checkpointing_enable({"use_reentrant": False})
 
+        # Untie lm_head from embedding weights — tied weights cause DDP to register
+        # the same parameter twice in backward hooks, triggering "ready twice" error
+        base = self.decoder.base_model.model if hasattr(self.decoder, "base_model") else self.decoder
+        if hasattr(base, "lm_head") and hasattr(base.model, "embed_tokens"):
+            if base.lm_head.weight.data_ptr() == base.model.embed_tokens.weight.data_ptr():
+                base.lm_head.weight = nn.Parameter(base.lm_head.weight.detach().clone())
+
     def freeze_for_lora_finetuning(self):
         """Stage 2: freeze visual encoder + decoder base weights, keep only LoRA adapters trainable."""
         for p in self.visual_encoder.parameters():

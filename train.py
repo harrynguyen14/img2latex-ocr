@@ -181,7 +181,9 @@ def run_training_phase(phase: str, config: dict, data_path: str,
         if is_master:
             print(f"Resumed from {resume}")
 
-    model           = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    model           = DDP(model, device_ids=[local_rank], find_unused_parameters=True,
+                          gradient_as_bucket_view=True)
+    model._set_static_graph()
     unwrapped_model = model.module
     tokenizer       = unwrapped_model.tokenizer
 
