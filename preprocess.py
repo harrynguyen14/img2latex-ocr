@@ -82,7 +82,13 @@ class LaTeXDataset(IterableDataset):
 
     def __iter__(self):
         for sample in self.ds:
-            img = resize_image(sample["image"].convert("RGB"))
+            raw = sample["image"]
+            if isinstance(raw, dict):
+                import io
+                img = Image.open(io.BytesIO(raw["bytes"]))
+            else:
+                img = raw
+            img = resize_image(img.convert("RGB"))
             tensor = image_to_tensor(img)  # (3, H, W)
 
             label = sample["label"]
