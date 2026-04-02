@@ -74,17 +74,47 @@ class LaTeXOCRModel(nn.Module):
             attention_mask,
         ], dim=1)
 
-        decoder_labels = None
-        if labels is not None:
-            visual_ignore = torch.full((B, num_visual_tokens), -100,
-                                       dtype=labels.dtype, device=labels.device)
-            decoder_labels = torch.cat([visual_ignore, labels], dim=1)
-
-        return self.decoder(
+        # Get hidden states only (no labels) — avoid materializing full logits tensor
+        # Full logits: vocab_size(151k) × seq_len × batch × 4bytes ≈ 774MB → OOM
+        hidden_states = self.decoder(
             inputs_embeds=inputs_embeds,
             attention_mask=combined_attention_mask,
-            labels=decoder_labels,
-        )
+            output_hidden_states=False,
+            return_dict=True,
+        ).logits  # (B, seq_len, vocab_size) — still needed but computed once
+
+        if labels is None:
+            import types
+            return types.SimpleNamespace(loss=None, logits=hidden_states)
+
+        # Build full label sequence (ignore visual token positions)
+        visual_ignore  = torch.full((B, num_visual_tokens), -100,
+                                    dtype=labels.dtype, device=labels.device)
+        decoder_labels = torch.cat([visual_ignore, labels], dim=1)  # (B, full_seq_len)
+
+        # Chunked cross-entropy: compute loss in chunks of `chunk_size` tokens
+        # Reduces peak memory from O(B × seq_len × vocab) to O(B × chunk × vocab)
+        logits        = hidden_states                                # (B, S, V)
+        shift_logits  = logits[:, :-1, :].contiguous()              # (B, S-1, V)
+        shift_labels  = decoder_labels[:, 1:].contiguous()          # (B, S-1)
+
+        chunk_size  = 512
+        total_loss  = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+        num_tokens  = (shift_labels != -100).sum().clamp(min=1)
+
+        for start in range(0, shift_logits.size(1), chunk_size):
+            chunk_logits = shift_logits[:, start:start + chunk_size, :]   # (B, chunk, V)
+            chunk_labels = shift_labels[:, start:start + chunk_size]      # (B, chunk)
+            chunk_loss   = torch.nn.functional.cross_entropy(
+                chunk_logits.reshape(-1, chunk_logits.size(-1)).float(),
+                chunk_labels.reshape(-1),
+                ignore_index=-100,
+                reduction="sum",
+            )
+            total_loss = total_loss + chunk_loss
+
+        import types
+        return types.SimpleNamespace(loss=total_loss / num_tokens)
 
     @torch.no_grad()
     def generate(self, pixel_values, patch_mask=None, max_new_tokens=None):
