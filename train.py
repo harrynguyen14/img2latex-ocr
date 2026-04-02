@@ -3,9 +3,9 @@ import argparse
 import contextlib
 import yaml
 import math
-import time
 import numpy as np
 import torch
+from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -155,12 +155,12 @@ def run_stage(stage: int, cfg: dict, data_path: str,
 
     global_step  = 0
     best_bleu    = -1.0
-    t0           = time.time()
     grad_accum   = cfg["grad_accum"]
     micro_step   = 0
     accum_loss   = 0.0
 
     data_iter = iter(train_loader)
+    pbar = tqdm(total=max_steps, desc=f"Stage {stage}", disable=not is_master)
 
     while global_step < max_steps:
         try:
@@ -201,11 +201,8 @@ def run_stage(stage: int, cfg: dict, data_path: str,
         step_loss    = accum_loss
         accum_loss   = 0.0
 
-        if is_master and global_step % 50 == 0:
-            dt = time.time() - t0
-            print(f"[Stage {stage}] step={global_step}/{max_steps}  "
-                  f"loss={step_loss:.4f}  lr={cur_lr:.2e}  t={dt:.1f}s")
-            t0 = time.time()
+        pbar.update(1)
+        pbar.set_postfix(loss=f"{step_loss:.4f}", lr=f"{cur_lr:.2e}")
 
         if global_step % eval_every == 0:
             max_eval = cfg.get("eval_samples", 200) // cfg["batch_size"]
