@@ -19,8 +19,8 @@ model:
 train:
   pretrain_epochs: 5
   lora_finetune_epochs: 10
-  batch_size: 2
-  grad_accum: 16           # effective batch = 2 * 2 GPUs * 16 = 64
+  batch_size: 4
+  grad_accum: 8            # effective batch = 4 * 2 GPUs * 8 = 64
   pretrain_lr: 1.0e-4
   lora_finetune_lr: 5.0e-5
   weight_decay: 0.01

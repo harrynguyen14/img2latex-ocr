@@ -142,21 +142,31 @@ def run_training_phase(phase: str, config: dict, data_path: str,
                        rank: int, local_rank: int, world_size: int,
                        resume: str = None):
     """
-    phase: "pretrain" (end-to-end, all params) or "lora_finetune" (LoRA adapters only).
+    phase: "pretrain" (encoder + bridge + LoRA decoder) or "lora_finetune" (LoRA adapters only).
+    Both phases use LoRA on the decoder to keep optimizer state memory within T4 VRAM budget.
     """
     device    = torch.device(f"cuda:{local_rank}")
     is_master = rank == 0
-    use_lora  = phase == "lora_finetune"
     ckpt_dir  = Path(config["ckpt_dir"]) / phase
 
-    model_config = {**config, "use_lora": use_lora, "max_new_tokens": config["max_token_len"]}
+    # Always use LoRA: full decoder AdamW states (~6GB) exceed T4 15GB budget
+    model_config = {**config, "use_lora": True, "max_new_tokens": config["max_token_len"]}
     model        = LaTeXOCRModel(model_config).to(device)
+
+    if phase == "pretrain" and is_master:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[Pretrain] Trainable: {trainable_params / 1e6:.1f}M params "
+              f"(encoder + bridge + LoRA adapters).")
 
     if phase == "lora_finetune":
         pretrain_best = Path(config["ckpt_dir"]) / "pretrain" / "best"
         if pretrain_best.exists():
             pretrained, _ = LaTeXOCRModel.from_checkpoint(str(pretrain_best), device=str(device))
             model.visual_encoder.load_state_dict(pretrained.visual_encoder.state_dict())
+            pretrained_lora = {k: v for k, v in pretrained.decoder.state_dict().items()
+                               if "lora_" in k}
+            if pretrained_lora:
+                model.decoder.load_state_dict(pretrained_lora, strict=False)
             if is_master:
                 print(f"Loaded pretrain weights from {pretrain_best}")
         model.freeze_for_lora_finetuning()
@@ -171,7 +181,7 @@ def run_training_phase(phase: str, config: dict, data_path: str,
         if is_master:
             print(f"Resumed from {resume}")
 
-    model           = DDP(model, device_ids=[local_rank], find_unused_parameters=use_lora)
+    model           = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     unwrapped_model = model.module
     tokenizer       = unwrapped_model.tokenizer
 
