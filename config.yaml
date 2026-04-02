@@ -19,8 +19,8 @@ model:
 train:
   stage1_epochs: 5
   stage2_epochs: 10
-  batch_size: 6       # tăng từ 2 → 6 (~3x throughput); giảm nếu OOM
-  grad_accum: 6       # giữ effective batch = 6*2*6 = 72 ≈ trước (2*2*16=64)
+  batch_size: 3       # giảm do OOM; effective batch = 3*2*11 = 66
+  grad_accum: 11      # giữ effective batch ≈ 64
   lr_stage1: 1.0e-4
   lr_stage2: 5.0e-5
   weight_decay: 0.01

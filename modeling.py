@@ -54,6 +54,9 @@ class LaTeXOCRModel(nn.Module):
     def freeze_decoder(self):
         for p in self.decoder.parameters():
             p.requires_grad = False
+        # Recompute activations during backward instead of storing → saves ~40% activation memory
+        if hasattr(self.decoder, "gradient_checkpointing_enable"):
+            self.decoder.gradient_checkpointing_enable({"use_reentrant": False})
 
     def unfreeze_lora(self):
         for name, p in self.decoder.named_parameters():

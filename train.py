@@ -270,8 +270,9 @@ def main():
     args = parse_args()
     cfg  = load_config(args.config)
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # avoid deadlock with DataLoader workers
-    torch.backends.cudnn.benchmark = True            # faster conv ops for fixed input sizes
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"           # avoid deadlock with DataLoader workers
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # reduce fragmentation
+    torch.backends.cudnn.benchmark = True                    # faster conv ops for fixed input sizes
 
     rank, local_rank, world_size = setup_ddp()
     torch.manual_seed(cfg.get("seed", 42) + rank)
