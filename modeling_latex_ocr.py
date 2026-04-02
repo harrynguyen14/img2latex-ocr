@@ -120,6 +120,7 @@ class LaTeXOCRModel(PreTrainedModel):
         return self.decoder.get_input_embeddings()
 
     def forward(self, pixel_values, patch_mask=None, input_ids=None, attention_mask=None, labels=None):
+        pixel_values = pixel_values.to(dtype=torch.float16)
         visual_tokens, vis_mask = self.visual_encoder(pixel_values, patch_mask)
         token_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([visual_tokens, token_embeds], dim=1)
@@ -138,6 +139,7 @@ class LaTeXOCRModel(PreTrainedModel):
     @torch.no_grad()
     def generate(self, pixel_values, patch_mask=None, max_new_tokens=None):
         max_new_tokens = max_new_tokens or self.config.max_new_tokens
+        pixel_values = pixel_values.to(dtype=torch.float16)
         visual_tokens, vis_mask = self.visual_encoder(pixel_values, patch_mask)
 
         B = visual_tokens.shape[0]
