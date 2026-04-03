@@ -1,5 +1,5 @@
 data:
-  dataset_id: "harryrobert/latex-ocr-v2"
+  dataset_id: "harryrobert/latex-ocr-v3"
   data_path: ""
   parquet_map_mode: true
   train_split: "mlp_train"
