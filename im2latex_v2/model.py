@@ -148,9 +148,19 @@ class LaTeXOCRModel(nn.Module):
         model.visual_encoder.load_state_dict(ve, strict=True)
         model.decoder.model.load_state_dict(dec, strict=True)
         if (checkpoint_dir / "tokenizer_config.json").exists():
-            model.decoder.tokenizer = AutoTokenizer.from_pretrained(
-                str(checkpoint_dir), trust_remote_code=True
-            )
+            # Some tokenizer families (e.g. Mistral) require `fix_mistral_regex=True`
+            # to avoid incorrect tokenization. Keep a fallback for older transformers.
+            try:
+                model.decoder.tokenizer = AutoTokenizer.from_pretrained(
+                    str(checkpoint_dir),
+                    trust_remote_code=True,
+                    fix_mistral_regex=True,
+                )
+            except TypeError:
+                model.decoder.tokenizer = AutoTokenizer.from_pretrained(
+                    str(checkpoint_dir),
+                    trust_remote_code=True,
+                )
             model.tokenizer = model.decoder.tokenizer
         return model.to(device)
 
