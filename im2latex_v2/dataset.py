@@ -177,7 +177,6 @@ class LaTeXOCRDataset(IterableDataset):
                 self.hf_dataset_id,
                 split=split,
                 streaming=True,
-                trust_remote_code=True,
             )
             if world_size > 1:
                 ds = ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
@@ -185,7 +184,7 @@ class LaTeXOCRDataset(IterableDataset):
             try:
                 from datasets import load_dataset_builder
 
-                builder = load_dataset_builder(self.hf_dataset_id, trust_remote_code=True)
+                builder = load_dataset_builder(self.hf_dataset_id)
                 builder.download_and_prepare()
                 self.num_samples = builder.info.splits[split].num_examples
             except Exception:
