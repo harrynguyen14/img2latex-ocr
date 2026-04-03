@@ -16,10 +16,11 @@ class QwenCausalDecoder(nn.Module):
         super().__init__()
         self.config = config
         name = config["tokenizer_name"]
-        dt = _dtype_from_str(config.get("torch_dtype", "bfloat16"))
+        # Newer Transformers prefer `dtype=` over `torch_dtype=`.
+        dt = _dtype_from_str(config.get("dtype", config.get("torch_dtype", "bfloat16")))
         self.model = AutoModelForCausalLM.from_pretrained(
             name,
-            torch_dtype=dt,
+            dtype=dt,
             trust_remote_code=True,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)

@@ -38,6 +38,11 @@ def apply_2d_rope(q, k, h_idx, w_idx):
     B, H, N, D = q.shape
     device = q.device
 
+    # With the current `rotate_half()` implementation we rotate over pairs,
+    # so RoPE requires D to be divisible by 4 for the 2D split below.
+    if D % 4 != 0:
+        raise ValueError(f"apply_2d_rope expects dim_head divisible by 4, got D={D}")
+
     dim_half = D // 2
     dim_quarter = D // 4
 
@@ -52,6 +57,14 @@ def apply_2d_rope(q, k, h_idx, w_idx):
 
     sin_h, cos_h = h_theta.sin(), h_theta.cos()
     sin_w, cos_w = w_theta.sin(), w_theta.cos()
+
+    # Expand (dim_quarter) -> (dim_half) to match x's last-dim.
+    # `rope()` multiplies elementwise with `x`, so sin/cos must have the same
+    # trailing dimension as `q_h` / `q_w` (= dim_half).
+    sin_h = torch.cat([sin_h, sin_h], dim=-1)
+    cos_h = torch.cat([cos_h, cos_h], dim=-1)
+    sin_w = torch.cat([sin_w, sin_w], dim=-1)
+    cos_w = torch.cat([cos_w, cos_w], dim=-1)
 
     sin_h = sin_h[:, None, :, :]
     cos_h = cos_h[:, None, :, :]

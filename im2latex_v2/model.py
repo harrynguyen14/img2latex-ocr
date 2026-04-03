@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
+from huggingface_hub import snapshot_download
 
 from transformers import AutoTokenizer
 
@@ -152,6 +153,36 @@ class LaTeXOCRModel(nn.Module):
             )
             model.tokenizer = model.decoder.tokenizer
         return model.to(device)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        repo_id_or_path: str,
+        *,
+        device: str = "cpu",
+        revision: str | None = None,
+        cache_dir: str | None = None,
+        local_files_only: bool = False,
+    ):
+        """
+        Load a LaTeXOCRModel from either a local checkpoint folder or a Hugging Face Hub repo.
+
+        - If `repo_id_or_path` is a local directory containing `config.json` and `model.safetensors`,
+          it is passed directly to `from_checkpoint`.
+        - Otherwise, `snapshot_download` is used to fetch the repo from the Hub, and the
+          downloaded snapshot directory is passed to `from_checkpoint`.
+        """
+        p = Path(repo_id_or_path)
+        if p.is_dir() and (p / "config.json").is_file() and (p / "model.safetensors").is_file():
+            return cls.from_checkpoint(str(p), device=device)
+
+        local_dir = snapshot_download(
+            repo_id_or_path,
+            revision=revision,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        return cls.from_checkpoint(local_dir, device=device)
 
 
 def alignment_loss(model: LaTeXOCRModel, batched_images, labels: torch.Tensor):
