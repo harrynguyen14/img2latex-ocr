@@ -1,0 +1,63 @@
+data:
+  dataset_id: "harryrobert/latex-ocr-v3"
+  data_path: ""
+  parquet_map_mode: true
+  train_split: "full_train"
+  val_split: "dev"
+  test_split: "test"
+  max_token_len: 200
+  resize_in_dataset: true
+  image_height: 64
+  max_image_width: 672
+  max_image_height: 640
+  patch_size: 16
+
+model:
+  tokenizer_name: "Qwen/Qwen2.5-Coder-1.5B"
+  navit_dim: 1024
+  navit_depth: 12
+  navit_heads: 16
+  navit_dim_head: 64
+  navit_mlp_dim: 4096
+  navit_dropout: 0.0
+  navit_emb_dropout: 0.0
+  vision_hidden_size: 1024
+  llm_hidden_size: 1536
+  projector_intermediate_size: 4096
+  max_visual_tokens: 1024
+  torch_dtype: "bfloat16"
+
+train:
+  stage: 2
+  epochs: 1
+
+  batch_size: 2
+  grad_accum: 8
+
+  lr_stage1: 1.0e-4
+  lr_stage2: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  log_steps: 50
+  eval_steps: 500
+  save_steps: 1000
+
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+
+  amp_dtype: float16
+  gradient_checkpointing: true
+  cuda_benchmark: true
+  torch_compile: false
+  seed: 42
+  max_steps: 20000
+  eval_samples: 200
+
+paths:
+  ckpt_dir: "/kaggle/working/checkpoints"
+
+eval:
+  max_new_tokens: 256
+  num_beams: 4

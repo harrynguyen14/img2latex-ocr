@@ -326,18 +326,14 @@ def main():
             pbar.update(1)
             if is_master and global_step % log_every == 0:
                 ep = global_step / max(total_steps, 1)
-                log_line = {
-                    "loss": f"{accum_loss:.4f}",
-                    "grad_norm": f"{grad_norm:.4f}",
-                    "learning_rate": f"{t:.3e}",
-                    "epoch": f"{ep:.4f}",
-                }
-                print(log_line, flush=True)
-                pbar.set_postfix(
-                    loss=log_line["loss"],
-                    lr=log_line["learning_rate"][:10],
-                    epoch=log_line["epoch"],
+                # Print a single line per logging step (avoid tqdm postfix clutter).
+                msg = (
+                    f"loss={accum_loss:.4f} "
+                    f"grad_norm={grad_norm:.4f} "
+                    f"learning_rate={t:.3e} "
+                    f"epoch={ep:.4f}"
                 )
+                pbar.write(msg)
             accum_loss = 0.0
 
             if global_step > 0 and global_step % eval_every == 0 and stage == 2:
