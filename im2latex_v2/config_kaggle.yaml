@@ -30,7 +30,7 @@ model:
 train:
   stage: 1
   epochs: 1
-  batch_size: 4
+  batch_size: 8
   grad_accum: 4
   lr_stage1: 1.0e-4
   lr_stage2: 2.0e-5
