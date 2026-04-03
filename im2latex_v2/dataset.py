@@ -106,10 +106,32 @@ def collect_parquet_files(root: Path, split: str) -> list[Path]:
     root = Path(root)
     if not root.is_dir():
         return []
-    all_files = sorted(root.glob(f"{split}-*.parquet"))
-    single = root / f"{split}.parquet"
-    if single.exists() and single not in all_files:
-        all_files = [single] + all_files
+
+    # Local filenames may use '-' (e.g. mlp-train-00001-of-00007.parquet) while HF split keys use '_'
+    dash_split = split.replace("_", "-")
+    underscore_split = split.replace("-", "_")
+    candidates = []
+    for s in (split, dash_split, underscore_split):
+        if s and s not in candidates:
+            candidates.append(s)
+
+    all_files = []
+    for s in candidates:
+        all_files.extend(sorted(root.glob(f"{s}-*.parquet")))
+
+    # Deduplicate by path
+    all_files = sorted({f for f in all_files})
+
+    single_candidates = []
+    for s in candidates:
+        sp = root / f"{s}.parquet"
+        if sp.exists():
+            single_candidates.append(sp)
+    if single_candidates:
+        for sp in single_candidates:
+            if sp not in all_files:
+                all_files = [sp] + all_files
+
     if not all_files:
         all_files = sorted(root.glob("*.parquet"))
     return all_files
@@ -119,13 +141,14 @@ class LaTeXOCRParquetMapDataset(Dataset):
     def __init__(self, data_root: str, split: str, tokenizer, cfg: dict):
         from datasets import load_dataset
 
+        safe_split = split.replace("-", "_")
         files = collect_parquet_files(Path(data_root), split)
         if not files:
             raise FileNotFoundError(f"No parquet found for split={split} under {data_root}")
         self.ds = load_dataset(
             "parquet",
-            data_files={split: [str(f) for f in files]},
-            split=split,
+            data_files={safe_split: [str(f) for f in files]},
+            split=safe_split,
         )
         self.tokenizer = tokenizer
         self.cfg = cfg
@@ -173,11 +196,28 @@ class LaTeXOCRDataset(IterableDataset):
             self.hf_dataset_id = data_source
             from datasets import load_dataset
 
-            ds = load_dataset(
-                self.hf_dataset_id,
-                split=split,
-                streaming=True,
-            )
+            try:
+                ds = load_dataset(
+                    self.hf_dataset_id,
+                    split=split,
+                    streaming=True,
+                )
+            except Exception:
+                # HF datasets sometimes disallow '-' in split keys; try normalized alternatives.
+                alt = split.replace("-", "_")
+                if alt != split:
+                    ds = load_dataset(
+                        self.hf_dataset_id,
+                        split=alt,
+                        streaming=True,
+                    )
+                else:
+                    alt2 = split.replace("_", "-")
+                    ds = load_dataset(
+                        self.hf_dataset_id,
+                        split=alt2,
+                        streaming=True,
+                    )
             if world_size > 1:
                 ds = ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
             self.streaming_ds = ds
@@ -200,10 +240,11 @@ class LaTeXOCRDataset(IterableDataset):
             worker_files = files
         if not worker_files:
             return
+        safe_split = self.split.replace("-", "_")
         ds = load_dataset(
             "parquet",
-            data_files={self.split: [str(f) for f in worker_files]},
-            split=self.split,
+            data_files={safe_split: [str(f) for f in worker_files]},
+            split=safe_split,
             streaming=True,
         )
         for sample in ds:

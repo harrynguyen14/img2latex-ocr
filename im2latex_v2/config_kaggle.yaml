@@ -2,7 +2,7 @@ data:
   dataset_id: "harryrobert/latex-ocr-v2"
   data_path: ""
   parquet_map_mode: true
-  train_split: "mlp-train"
+  train_split: "mlp_train"
   val_split: "dev"
   test_split: "test"
   max_token_len: 200
