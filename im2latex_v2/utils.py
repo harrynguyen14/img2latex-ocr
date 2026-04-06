@@ -85,7 +85,8 @@ def amp_dtype_from_cfg(cfg: dict) -> torch.dtype:
     return torch.float16
 
 
-def configure_runtime(cfg: dict, device: torch.device):
+def configure_runtime(cfg, device: torch.device):
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    if device.type == "cuda" and cfg.get("cuda_benchmark", True):
+    cuda_benchmark = cfg.get("cuda_benchmark", True) if isinstance(cfg, dict) else getattr(cfg, "cuda_benchmark", True)
+    if device.type == "cuda" and cuda_benchmark:
         torch.backends.cudnn.benchmark = True
