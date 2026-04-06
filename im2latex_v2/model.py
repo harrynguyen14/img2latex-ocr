@@ -63,12 +63,17 @@ class LaTeXOCRModel(nn.Module):
             for p in self.visual_encoder.projector.parameters():
                 p.requires_grad = True
         else:
+            # Freeze NaViT
             for p in self.visual_encoder.navit.parameters():
-                p.requires_grad = False     
+                p.requires_grad = False
+            # Train projector
             for p in self.visual_encoder.projector.parameters():
                 p.requires_grad = True
+            # Decoder: chỉ set requires_grad cho float params
+            # 4-bit quantized params là integer, không set được
             for p in self.decoder.parameters():
-                p.requires_grad = True
+                if p.dtype in (torch.float32, torch.float16, torch.bfloat16):
+                    p.requires_grad = True
 
     def forward(
         self,
