@@ -218,7 +218,13 @@ def main():
     module = model.module if isinstance(model, DDP) else model
     trainable = [p for p in model.parameters() if p.requires_grad]
     lr = float(cfg["lr_stage1"] if stage == 1 else cfg["lr_stage2"])
-    opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=float(cfg["weight_decay"]))
+    try:
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(trainable, lr=lr, weight_decay=float(cfg["weight_decay"]))
+        print("[optimizer] Using AdamW8bit")
+    except ImportError:
+        opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=float(cfg["weight_decay"]))
+        print("[optimizer] Using AdamW fp32")
 
     global_step = 0
     best_bleu = -1.0
@@ -314,6 +320,7 @@ def main():
                             batch["labels"],
                         ).loss / accum
                 loss.backward()
+                torch.cuda.empty_cache()
             accum_loss += loss.item()
             micro += 1
 

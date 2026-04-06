@@ -44,7 +44,7 @@ train:
   prefetch_factor: 2
   persistent_workers: false
   amp_dtype: float16
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   cuda_benchmark: true
   torch_compile: false
   seed: 42
