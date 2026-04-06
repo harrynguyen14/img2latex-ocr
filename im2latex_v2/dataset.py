@@ -207,3 +207,22 @@ class LaTeXOCRDataset(IterableDataset):
         else:
             for sample in self.streaming_ds:
                 yield _process(sample, self.tokenizer, self.cfg)
+
+class LaTeXOCRDiskDataset(IterableDataset):
+    """Load từ dataset đã cache xuống disk bằng save_to_disk()"""
+    def __init__(self, cache_path: str, tokenizer, cfg: dict, rank: int = 0, world_size: int = 1):
+        from datasets import load_from_disk
+        self.ds = load_from_disk(cache_path)
+        self.tokenizer = tokenizer
+        self.cfg = cfg
+        self.rank = rank
+        self.world_size = world_size
+        self.num_samples = len(self.ds) // world_size
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        for i, sample in enumerate(self.ds):
+            if i % self.world_size == self.rank:
+                yield _process(sample, self.tokenizer, self.cfg)

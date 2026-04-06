@@ -12,17 +12,22 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from tqdm import tqdm
 
-from .collator import LaTeXOCRCollator
-from .config import load_config
-from .dataset import (
+from im2latex_v2.collator import LaTeXOCRCollator
+from im2latex_v2.config import load_config
+from im2latex_v2.dataset import (
     LaTeXOCRDataset,
     LaTeXOCRParquetMapDataset,
+    LaTeXOCRDiskDataset,
     get_tokenizer,
     resolve_data_source,
 )
 from im2latex_v2.evaluate import compute_metrics, print_metrics
 from im2latex_v2.model import LaTeXOCRModel, alignment_loss
 
+
+# ─────────────────────────────────────────────
+# DDP helpers
+# ─────────────────────────────────────────────
 
 def setup_ddp():
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -36,6 +41,10 @@ def cleanup_ddp():
         dist.destroy_process_group()
 
 
+# ─────────────────────────────────────────────
+# Batch helpers
+# ─────────────────────────────────────────────
+
 def move_batched_images(bi, device):
     return [[t.to(device, non_blocking=True) for t in imgs] for imgs in bi]
 
@@ -48,6 +57,10 @@ def move_batch(batch, device):
         "labels": batch["labels"].to(device, non_blocking=True),
     }
 
+
+# ─────────────────────────────────────────────
+# LR / AMP / runtime
+# ─────────────────────────────────────────────
 
 def lr_cosine(step: int, total: int, peak: float, warmup: int) -> float:
     if step < warmup:
@@ -68,6 +81,10 @@ def configure_runtime(cfg: dict, device: torch.device):
     if device.type == "cuda" and cfg.get("cuda_benchmark", True):
         torch.backends.cudnn.benchmark = True
 
+
+# ─────────────────────────────────────────────
+# DataLoader builder
+# ─────────────────────────────────────────────
 
 def build_dataloader(
     ds,
@@ -94,7 +111,91 @@ def build_dataloader(
     return DataLoader(ds, **kw)
 
 
-def save_training_state(ckpt_dir: Path, optimizer: torch.optim.Optimizer, global_step: int, best_bleu: float):
+# ─────────────────────────────────────────────
+# Dataset builder — MỚI
+# Ưu tiên: disk cache > parquet local > HF streaming
+# ─────────────────────────────────────────────
+
+DISK_CACHE_DIR = "/kaggle/working/cache"
+
+
+def build_datasets(cfg: dict, data_source: str, rank: int, world_size: int, tokenizer):
+    """
+    Trả về (train_ds, val_ds, use_map, train_sampler, val_sampler).
+
+    Thứ tự ưu tiên:
+    1. Disk cache  (/kaggle/working/cache/<split>)  — nhanh nhất
+    2. Parquet local  (parquet_map_mode=true + data_path là thư mục)
+    3. HF Hub streaming  — fallback cuối
+    """
+    train_split = cfg["train_split"]
+    val_split   = cfg["val_split"]
+
+    train_cache = Path(DISK_CACHE_DIR) / train_split
+    val_cache   = Path(DISK_CACHE_DIR) / val_split
+
+    train_sampler = None
+    val_sampler   = None
+    use_map       = False
+
+    # ── 1. Disk cache ──────────────────────────────────────────────────
+    if train_cache.exists() and val_cache.exists():
+        print(f"[dataset] disk cache found → {DISK_CACHE_DIR}")
+        train_ds = LaTeXOCRDiskDataset(
+            str(train_cache), tokenizer, cfg, rank=rank, world_size=world_size
+        )
+        val_ds = LaTeXOCRDiskDataset(
+            str(val_cache), tokenizer, cfg, rank=rank, world_size=world_size
+        )
+        return train_ds, val_ds, use_map, train_sampler, val_sampler
+
+    # ── 2. Parquet local ───────────────────────────────────────────────
+    data_path = Path(data_source)
+    if bool(cfg.get("parquet_map_mode", False)) and data_path.is_dir():
+        try:
+            train_ds = LaTeXOCRParquetMapDataset(
+                str(data_path), train_split, tokenizer, cfg
+            )
+            val_ds = LaTeXOCRParquetMapDataset(
+                str(data_path), val_split, tokenizer, cfg
+            )
+            use_map = True
+            print(f"[dataset] parquet map mode → {data_path}")
+            if dist.is_initialized():
+                distributed = True
+                train_sampler = DistributedSampler(
+                    train_ds, num_replicas=world_size, rank=rank,
+                    shuffle=True, drop_last=False
+                )
+                val_sampler = DistributedSampler(
+                    val_ds, num_replicas=world_size, rank=rank,
+                    shuffle=False, drop_last=False
+                )
+            return train_ds, val_ds, use_map, train_sampler, val_sampler
+        except FileNotFoundError:
+            pass
+
+    # ── 3. HF Hub streaming ────────────────────────────────────────────
+    print(f"[dataset] HF streaming → {data_source}")
+    train_ds = LaTeXOCRDataset(
+        data_source, train_split, tokenizer, cfg, rank=rank, world_size=world_size
+    )
+    val_ds = LaTeXOCRDataset(
+        data_source, val_split, tokenizer, cfg, rank=rank, world_size=world_size
+    )
+    return train_ds, val_ds, use_map, train_sampler, val_sampler
+
+
+# ─────────────────────────────────────────────
+# Checkpoint helpers
+# ─────────────────────────────────────────────
+
+def save_training_state(
+    ckpt_dir: Path,
+    optimizer: torch.optim.Optimizer,
+    global_step: int,
+    best_bleu: float,
+):
     ckpt_dir = Path(ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -114,6 +215,10 @@ def load_training_state(path: Path, map_location) -> dict | None:
     return torch.load(p, map_location=map_location, weights_only=False)
 
 
+# ─────────────────────────────────────────────
+# Eval
+# ─────────────────────────────────────────────
+
 @torch.no_grad()
 def run_eval(module, loader, device, tokenizer, max_batches: int, amp_dtype: torch.dtype):
     module.eval()
@@ -122,7 +227,9 @@ def run_eval(module, loader, device, tokenizer, max_batches: int, amp_dtype: tor
         if i >= max_batches:
             break
         batch = move_batch(batch, device)
-        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+        with torch.amp.autocast(
+            device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"
+        ):
             pr = module.generate(batch["batched_images"])
         preds.extend(pr)
         lid = batch["labels"].cpu().numpy()
@@ -131,6 +238,10 @@ def run_eval(module, loader, device, tokenizer, max_batches: int, amp_dtype: tor
     module.train()
     return compute_metrics(preds, refs)
 
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
@@ -165,45 +276,26 @@ def main():
     configure_runtime(cfg, device)
 
     stage = int(cfg.get("stage", 1))
-
     tokenizer = get_tokenizer(cfg["tokenizer_name"])
-    data_path = Path(data_source)
-    use_map = bool(cfg.get("parquet_map_mode", False)) and data_path.is_dir()
-    train_sampler = None
-    val_sampler = None
-    if use_map:
-        try:
-            train_ds = LaTeXOCRParquetMapDataset(
-                str(data_path), cfg["train_split"], tokenizer, cfg
-            )
-            val_ds = LaTeXOCRParquetMapDataset(str(data_path), cfg["val_split"], tokenizer, cfg)
-        except FileNotFoundError:
-            use_map = False
-    if not use_map:
-        train_ds = LaTeXOCRDataset(
-            data_source, cfg["train_split"], tokenizer, cfg, rank=rank, world_size=world_size
-        )
-        val_ds = LaTeXOCRDataset(
-            data_source, cfg["val_split"], tokenizer, cfg, rank=rank, world_size=world_size
-        )
-    if use_map and distributed:
-        train_sampler = DistributedSampler(
-            train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False
-        )
-        val_sampler = DistributedSampler(
-            val_ds, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
-        )
 
+    # ── Dataset ───────────────────────────────────────────────────────
+    train_ds, val_ds, use_map, train_sampler, val_sampler = build_datasets(
+        cfg, data_source, rank, world_size, tokenizer
+    )
+
+    # ── Model ─────────────────────────────────────────────────────────
     model = LaTeXOCRModel(cfg)
     model.visual_encoder = model.visual_encoder.to(device)
 
     resume_dir = Path(args.resume).resolve() if args.resume else None
     if resume_dir is not None and resume_dir.is_dir():
         from safetensors.torch import load_file
-        import json
         raw = load_file(str(resume_dir / "model.safetensors"), device=str(device))
-        ve_state = {k.replace("visual_encoder.", ""): v 
-                    for k, v in raw.items() if k.startswith("visual_encoder.")}
+        ve_state = {
+            k.replace("visual_encoder.", ""): v
+            for k, v in raw.items()
+            if k.startswith("visual_encoder.")
+        }
         model.visual_encoder.load_state_dict(ve_state, strict=True)
         print("[resume] Loaded visual_encoder weights from stage1 checkpoint")
 
@@ -217,20 +309,33 @@ def main():
         model.gradient_checkpointing_enable()
 
     if cfg.get("torch_compile", False) and hasattr(torch, "compile") and device.type == "cuda":
-        model = torch.compile(model, mode="reduce-overhead")
+        model.visual_encoder = torch.compile(
+            model.visual_encoder, mode="reduce-overhead", fullgraph=False
+        )
+        print("[compile] visual_encoder compiled")
 
     if distributed:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=(stage == 2))
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            find_unused_parameters=(stage == 2),
+        )
 
     module = model.module if isinstance(model, DDP) else model
     trainable = [p for p in model.parameters() if p.requires_grad]
     lr = float(cfg["lr_stage1"] if stage == 1 else cfg["lr_stage2"])
+
+    # AdamW8bit nếu có bitsandbytes, fallback AdamW fp32
     try:
         import bitsandbytes as bnb
-        opt = bnb.optim.AdamW8bit(trainable, lr=lr, weight_decay=float(cfg["weight_decay"]))
+        opt = bnb.optim.AdamW8bit(
+            trainable, lr=lr, weight_decay=float(cfg["weight_decay"])
+        )
         print("[optimizer] Using AdamW8bit")
     except ImportError:
-        opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=float(cfg["weight_decay"]))
+        opt = torch.optim.AdamW(
+            trainable, lr=lr, weight_decay=float(cfg["weight_decay"])
+        )
         print("[optimizer] Using AdamW fp32")
 
     global_step = 0
@@ -240,54 +345,54 @@ def main():
         try:
             opt.load_state_dict(ts["optimizer"])
         except ValueError:
-            print("[resume] Optimizer param groups mismatch — skipping optimizer state (cross-stage resume)")
+            print(
+                "[resume] Optimizer param groups mismatch "
+                "— skipping optimizer state (cross-stage resume)"
+            )
         global_step = int(ts.get("global_step", 0))
         best_bleu = float(ts.get("best_bleu", -1.0))
 
-    bs = int(cfg["batch_size"])
-    nw = int(cfg["num_workers"])
-    prefetch = int(cfg.get("prefetch_factor", 2))
+    # ── DataLoaders ───────────────────────────────────────────────────
+    bs         = int(cfg["batch_size"])
+    nw         = int(cfg["num_workers"])
+    prefetch   = int(cfg.get("prefetch_factor", 2))
     persistent = bool(cfg.get("persistent_workers", True)) and nw > 0
-    train_shuffle = train_sampler is None and not distributed and not isinstance(train_ds, IterableDataset)
-    val_shuffle = False
-    train_loader = build_dataloader(
-        train_ds,
-        bs,
-        nw,
-        LaTeXOCRCollator(),
-        device.type == "cuda",
-        prefetch,
-        persistent,
-        sampler=train_sampler,
-        shuffle=train_shuffle,
-    )
-    val_loader = build_dataloader(
-        val_ds,
-        bs,
-        nw,
-        LaTeXOCRCollator(),
-        device.type == "cuda",
-        prefetch,
-        persistent,
-        sampler=val_sampler,
-        shuffle=val_shuffle,
+    train_shuffle = (
+        train_sampler is None
+        and not distributed
+        and not isinstance(train_ds, IterableDataset)
     )
 
+    train_loader = build_dataloader(
+        train_ds, bs, nw, LaTeXOCRCollator(),
+        device.type == "cuda", prefetch, persistent,
+        sampler=train_sampler, shuffle=train_shuffle,
+    )
+    val_loader = build_dataloader(
+        val_ds, bs, nw, LaTeXOCRCollator(),
+        device.type == "cuda", prefetch, persistent,
+        sampler=val_sampler, shuffle=False,
+    )
+
+    # ── Steps / warmup ────────────────────────────────────────────────
     ckpt_root = Path(cfg.get("ckpt_dir", "checkpoints"))
     if is_master:
         ckpt_root.mkdir(parents=True, exist_ok=True)
-    sub = f"stage{stage}"
-    ckpt_dir = ckpt_root / sub
+    ckpt_dir = ckpt_root / f"stage{stage}"
 
-    epochs = int(cfg["epochs"])
-    accum = int(cfg["grad_accum"])
+    epochs        = int(cfg["epochs"])
+    accum         = int(cfg["grad_accum"])
     max_steps_cap = int(cfg.get("max_steps", 100000))
-    log_every = int(cfg["log_steps"])
-    eval_every = int(cfg["eval_steps"])
-    save_every = int(cfg["save_steps"])
-    eval_samples = int(cfg.get("eval_samples", 200))
+    log_every     = int(cfg["log_steps"])
+    eval_every    = int(cfg["eval_steps"])
+    save_every    = int(cfg["save_steps"])
+    eval_samples  = int(cfg.get("eval_samples", 200))
 
-    ns = len(train_ds) if use_map else train_ds.num_samples
+    ns = (
+        len(train_ds)
+        if use_map
+        else getattr(train_ds, "num_samples", None)
+    )
     if ns:
         spe = max(ns // max(world_size, 1) // max(bs, 1), 1)
         total_steps = min(spe * epochs // max(accum, 1), max_steps_cap)
@@ -295,21 +400,28 @@ def main():
         total_steps = max_steps_cap
     warmup = max(int(total_steps * float(cfg.get("warmup_ratio", 0.05))), 1)
 
-    micro = 0
+    # ── Training loop ─────────────────────────────────────────────────
+    micro      = 0
     accum_loss = 0.0
-    pbar = tqdm(total=total_steps, initial=global_step, disable=not is_master)
+    pbar       = tqdm(total=total_steps, initial=global_step, disable=not is_master)
 
     model.train()
     epoch_idx = 0
     while global_step < total_steps:
         if train_sampler is not None:
             train_sampler.set_epoch(epoch_idx)
+
         for batch in train_loader:
             if global_step >= total_steps:
                 break
-            batch = move_batch(batch, device)
+
+            batch   = move_batch(batch, device)
             is_sync = micro == accum - 1
-            sync_ctx = model.no_sync() if isinstance(model, DDP) and not is_sync else contextlib.nullcontext()
+            sync_ctx = (
+                model.no_sync()
+                if isinstance(model, DDP) and not is_sync
+                else contextlib.nullcontext()
+            )
 
             with sync_ctx:
                 with torch.amp.autocast(
@@ -318,16 +430,23 @@ def main():
                     enabled=device.type == "cuda",
                 ):
                     if stage == 1:
-                        loss = alignment_loss(module, batch["batched_images"], batch["labels"]) / accum
+                        loss = (
+                            alignment_loss(module, batch["batched_images"], batch["labels"])
+                            / accum
+                        )
                     else:
-                        loss = model(
-                            batch["batched_images"],
-                            batch["input_ids"],
-                            batch["attention_mask"],
-                            batch["labels"],
-                        ).loss / accum
+                        loss = (
+                            model(
+                                batch["batched_images"],
+                                batch["input_ids"],
+                                batch["attention_mask"],
+                                batch["labels"],
+                            ).loss
+                            / accum
+                        )
                 loss.backward()
                 torch.cuda.empty_cache()
+
             accum_loss += loss.item()
             micro += 1
 
@@ -337,17 +456,21 @@ def main():
             t = lr_cosine(global_step, total_steps, lr, warmup)
             for g in opt.param_groups:
                 g["lr"] = t
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, float(cfg["max_grad_norm"]))
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                trainable, float(cfg["max_grad_norm"])
+            )
             if isinstance(grad_norm, torch.Tensor):
                 grad_norm = grad_norm.item()
+
             opt.step()
             opt.zero_grad(set_to_none=True)
             global_step += 1
             micro = 0
             pbar.update(1)
+
             if is_master and global_step % log_every == 0:
-                ep = global_step / max(total_steps, 1)
-                # Print a single line per logging step (avoid tqdm postfix clutter).
+                ep  = global_step / max(total_steps, 1)
                 msg = (
                     f"loss={accum_loss:.4f} "
                     f"grad_norm={grad_norm:.4f} "
@@ -361,12 +484,12 @@ def main():
                 if distributed:
                     dist.barrier()
                 if is_master:
-                    mb = max(eval_samples // bs, 1)
+                    mb   = max(eval_samples // bs, 1)
                     mets = run_eval(module, val_loader, device, tokenizer, mb, amp_dtype)
                     print_metrics(mets, prefix=f"step {global_step}")
                     if mets["bleu4"] > best_bleu:
-                        best_bleu = mets["bleu4"]
-                        best_path = ckpt_dir / "best"
+                        best_bleu  = mets["bleu4"]
+                        best_path  = ckpt_dir / "best"
                         module.save_checkpoint(str(best_path), step=global_step, metrics=mets)
                         save_training_state(best_path, opt, global_step, best_bleu)
                 if distributed:
