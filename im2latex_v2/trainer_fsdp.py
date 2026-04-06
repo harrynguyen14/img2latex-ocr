@@ -28,6 +28,7 @@ class FSDPTrainer(BaseTrainer):
                 print("[resume] Loaded visual_encoder weights")
 
         self.model.set_train_stage(args.stage)
+        self.model = self.model.to(dtype=self.amp_dtype)
 
         if args.torch_compile and hasattr(torch, "compile") and device.type == "cuda":
             self.model.visual_encoder = torch.compile(self.model.visual_encoder, mode="reduce-overhead", fullgraph=False)

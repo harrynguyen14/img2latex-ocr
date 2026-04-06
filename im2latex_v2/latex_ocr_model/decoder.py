@@ -21,7 +21,7 @@ class QwenCausalDecoder(nn.Module):
         if stage == 1:
             self.model = AutoModelForCausalLM.from_pretrained(
                 name,
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
                 trust_remote_code=True,
             )
         else:
