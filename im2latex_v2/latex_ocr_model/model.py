@@ -29,8 +29,10 @@ class VisualEncoder(nn.Module):
 
 
 class LaTeXOCRModel(nn.Module):
-    def __init__(self, config: dict):
+    def __init__(self, config):
         super().__init__()
+        if not isinstance(config, dict):
+            config = vars(config)
         self.config = dict(config)
         ps = config["patch_size"]
         ih = config["image_height"]

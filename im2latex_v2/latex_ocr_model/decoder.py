@@ -16,21 +16,28 @@ class QwenCausalDecoder(nn.Module):
         super().__init__()
         self.config = config
         name = config["tokenizer_name"]
+        stage = config.get("stage", 2)
 
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
+        if stage == 1:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                name,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+            )
+        else:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                name,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+            )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            name,
-            quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=True,
-            # attn_implementation="flash_attention_2",
-        )
         self.tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
