@@ -15,10 +15,12 @@ def divisible_by(numer, denom):
 class LayerNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.norm = nn.LayerNorm(dim)
+        self.dim = dim
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        return self.norm(x)
+        return F.layer_norm(x, (self.dim,), self.weight.to(x.dtype), self.bias.to(x.dtype))
 
 class RMSNorm(nn.Module):
     def __init__(self, heads, dim):
