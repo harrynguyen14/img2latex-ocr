@@ -63,7 +63,11 @@ class LaTeXOCRModel(nn.Module):
             for p in self.visual_encoder.projector.parameters():
                 p.requires_grad = True
         else:
-            for p in self.parameters():
+            for p in self.visual_encoder.navit.parameters():
+                p.requires_grad = False     
+            for p in self.visual_encoder.projector.parameters():
+                p.requires_grad = True
+            for p in self.decoder.parameters():
                 p.requires_grad = True
 
     def forward(
