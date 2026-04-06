@@ -29,6 +29,7 @@ class QwenCausalDecoder(nn.Module):
             quantization_config=bnb_config,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation="flash_attention_2",
         )
         self.tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
