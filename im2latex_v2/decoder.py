@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
 def _dtype_from_str(name: str):
@@ -16,10 +16,18 @@ class QwenCausalDecoder(nn.Module):
         super().__init__()
         self.config = config
         name = config["tokenizer_name"]
-        dt = _dtype_from_str(config.get("dtype", config.get("torch_dtype", "bfloat16")))
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
         self.model = AutoModelForCausalLM.from_pretrained(
             name,
-            dtype=dt,
+            quantization_config=bnb_config,
+            device_map="auto",
             trust_remote_code=True,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
@@ -27,8 +35,12 @@ class QwenCausalDecoder(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def apply_lora(self):
-        """Gọi sau khi load weights xong."""
-        from peft import get_peft_model, LoraConfig, TaskType
+        from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
+        # Cần prepare trước khi apply LoRA với quantized model
+        self.model = prepare_model_for_kbit_training(
+            self.model,
+            use_gradient_checkpointing=False,
+        )
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=16,
