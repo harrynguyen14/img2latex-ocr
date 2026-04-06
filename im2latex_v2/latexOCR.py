@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from im2latex_v2.mlp_projector import MLPProjector
-from im2latex_v2.encoder import NaViT_Encoder
+from .mlp_projector import MLPProjector
+from .encoder import NaViT_Encoder
 
 
 class VisualEncoder(nn.Module):

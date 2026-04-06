@@ -12,9 +12,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
-from im2latex_v2.collator import LaTeXOCRCollator
-from im2latex_v2.config import load_config
-from im2latex_v2.dataset import (
+from .collator import LaTeXOCRCollator
+from .config import load_config
+from .dataset import (
     LaTeXOCRDataset,
     LaTeXOCRParquetMapDataset,
     get_tokenizer,

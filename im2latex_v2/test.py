@@ -6,11 +6,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from im2latex_v2.collator import LaTeXOCRCollator
-from im2latex_v2.config import load_config
-from im2latex_v2.dataset import LaTeXOCRDataset, get_tokenizer, resolve_data_source
-from im2latex_v2.evaluate import compute_metrics, print_metrics
-from im2latex_v2.model import LaTeXOCRModel
+from .collator import LaTeXOCRCollator
+from .config import load_config
+from .dataset import LaTeXOCRDataset, get_tokenizer, resolve_data_source
+from .evaluate import compute_metrics, print_metrics
+from .model import LaTeXOCRModel
 
 
 def move_batched_images(bi, device):

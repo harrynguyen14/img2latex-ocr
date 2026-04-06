@@ -8,10 +8,10 @@ from huggingface_hub import snapshot_download
 
 from transformers import AutoTokenizer
 
-from im2latex_v2.decoder import QwenCausalDecoder
-from im2latex_v2.latexOCR import VisualEncoder
-from im2latex_v2.mlp_projector import MLPProjector
-from im2latex_v2.encoder import NaViT_Encoder
+from .decoder import QwenCausalDecoder
+from .latexOCR import VisualEncoder
+from .mlp_projector import MLPProjector
+from .encoder import NaViT_Encoder
 
 
 class LaTeXOCRModel(nn.Module):
