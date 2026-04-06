@@ -1,11 +1,11 @@
 data:
   dataset_id: "harryrobert/latex-ocr-v3"
   data_path: ""
-  parquet_map_mode: true
+  parquet_map_mode: false
   train_split: "full_train"
   val_split: "dev"
   test_split: "test"
-  max_token_len: 200
+  max_token_len: 150
   resize_in_dataset: true
   image_height: 64
   max_image_width: 672
@@ -24,15 +24,15 @@ model:
   vision_hidden_size: 1024
   llm_hidden_size: 1536
   projector_intermediate_size: 4096
-  max_visual_tokens: 1024
+  max_visual_tokens: 512
   torch_dtype: "bfloat16"
 
 train:
   stage: 2
   epochs: 1
 
-  batch_size: 2
-  grad_accum: 8
+  batch_size: 1
+  grad_accum: 16
 
   lr_stage1: 1.0e-4
   lr_stage2: 2.0e-5
@@ -41,12 +41,11 @@ train:
   warmup_ratio: 0.05
   log_steps: 50
   eval_steps: 500
-  # Reduce checkpoint frequency to avoid filling disk on Kaggle.
   save_steps: 10000
 
-  num_workers: 4
+  num_workers: 2
   prefetch_factor: 2
-  persistent_workers: true
+  persistent_workers: false
 
   amp_dtype: float16
   gradient_checkpointing: true
