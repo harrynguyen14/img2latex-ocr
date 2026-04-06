@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import get_peft_model, LoraConfig, TaskType
 
 
 def _dtype_from_str(name: str):
@@ -16,7 +17,6 @@ class QwenCausalDecoder(nn.Module):
         super().__init__()
         self.config = config
         name = config["tokenizer_name"]
-        # Newer Transformers prefer `dtype=` over `torch_dtype=`.
         dt = _dtype_from_str(config.get("dtype", config.get("torch_dtype", "bfloat16")))
         self.model = AutoModelForCausalLM.from_pretrained(
             name,
@@ -26,6 +26,18 @@ class QwenCausalDecoder(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Thêm LoRA
+        lora_cfg = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            bias="none",
+        )
+        self.model = get_peft_model(self.model, lora_cfg)
+        self.model.print_trainable_parameters()
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
