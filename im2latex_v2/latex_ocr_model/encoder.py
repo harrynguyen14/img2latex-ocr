@@ -18,7 +18,7 @@ class LayerNorm(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        return self.norm(x.float()).to(x.dtype)
+        return self.norm(x)
 
 class RMSNorm(nn.Module):
     def __init__(self, heads, dim):
@@ -27,7 +27,7 @@ class RMSNorm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(heads, 1, dim))
 
     def forward(self, x):
-        return F.normalize(x, dim=-1) * self.scale * self.gamma
+        return F.normalize(x, dim=-1) * self.scale * self.gamma.to(x.dtype)
 
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
@@ -51,8 +51,8 @@ def apply_2d_rope(q, k, h_idx, w_idx):
     freq_seq = torch.arange(dim_quarter, device=device).float()
     inv_freq = 1.0 / (10000 ** (freq_seq / dim_quarter))
 
-    h_theta = h_idx[..., None] * inv_freq
-    w_theta = w_idx[..., None] * inv_freq
+    h_theta = h_idx[..., None].float() * inv_freq
+    w_theta = w_idx[..., None].float() * inv_freq
 
     sin_h, cos_h = h_theta.sin(), h_theta.cos()
     sin_w, cos_w = w_theta.sin(), w_theta.cos()

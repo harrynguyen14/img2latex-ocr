@@ -9,6 +9,7 @@ from tqdm import tqdm
 from .utils import move_batch, wrap_fsdp
 from .latex_ocr_model import LaTeXOCRModel, alignment_loss
 from .trainer_base import BaseTrainer, save_training_state, load_training_state
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 
 class FSDPTrainer(BaseTrainer):
@@ -33,6 +34,8 @@ class FSDPTrainer(BaseTrainer):
         if args.torch_compile and hasattr(torch, "compile") and device.type == "cuda":
             self.model.visual_encoder = torch.compile(self.model.visual_encoder, mode="reduce-overhead", fullgraph=False)
             print("[compile] visual_encoder compiled")
+
+        self.raw_model = self.model
 
         if distributed:
             self.model = wrap_fsdp(self.model, self.amp_dtype)
@@ -66,7 +69,7 @@ class FSDPTrainer(BaseTrainer):
                 is_sync = micro == accum - 1
 
                 with self._no_sync_ctx(is_sync):
-                    loss = alignment_loss(self.model, batch["batched_images"], batch["labels"]) / accum
+                    loss = alignment_loss(self.raw_model, batch["batched_images"], batch["labels"]) / accum
                     loss.backward()
                     torch.cuda.empty_cache()
 
