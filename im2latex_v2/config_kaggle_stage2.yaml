@@ -31,8 +31,8 @@ train:
   stage: 2
   epochs: 1
 
-  batch_size: 4
-  grad_accum: 6
+  batch_size: 2
+  grad_accum: 8
 
   lr_stage1: 1.0e-4
   lr_stage2: 2.0e-5
