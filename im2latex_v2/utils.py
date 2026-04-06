@@ -30,22 +30,15 @@ def cleanup_distributed():
 def wrap_fsdp(model, amp_dtype: torch.dtype):
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, BackwardPrefetch
-    from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-
-    try:
-        from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
-        from .latex_ocr_model.encoder import Transformer
-        wrap_cls = {Qwen2DecoderLayer, Transformer}
-    except ImportError:
-        wrap_cls = set()
-
-    auto_wrap = functools.partial(transformer_auto_wrap_policy, transformer_layer_cls=wrap_cls) if wrap_cls else None
+    from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
     mp = MixedPrecision(
         param_dtype=amp_dtype,
         reduce_dtype=torch.float32,
         buffer_dtype=amp_dtype,
     )
+
+    auto_wrap = functools.partial(size_based_auto_wrap_policy, min_num_params=1_000_000)
 
     return FSDP(
         model,
