@@ -52,11 +52,12 @@ def _to_tensor(img: Image.Image) -> torch.Tensor:
 def _decode_image(raw) -> Image.Image:
     if isinstance(raw, Image.Image):
         return raw.convert("RGB")
-    if isinstance(raw, dict) and raw.get("bytes"):
-        return Image.open(io.BytesIO(raw["bytes"])).convert("RGB")
-    if isinstance(raw, dict) and raw.get("path"):
-        return Image.open(raw["path"]).convert("RGB")
-    return raw.convert("RGB") if hasattr(raw, "convert") else Image.open(raw).convert("RGB")
+    if isinstance(raw, dict):
+        if raw.get("bytes"):
+            return Image.open(io.BytesIO(raw["bytes"])).convert("RGB")
+        if raw.get("path"):
+            return Image.open(raw["path"]).convert("RGB")
+    raise ValueError(f"Cannot decode image from {type(raw)}")
 
 
 def _process(sample: dict, tokenizer, cfg: dict) -> dict:
@@ -106,35 +107,13 @@ def collect_parquet_files(root: Path, split: str) -> list[Path]:
     root = Path(root)
     if not root.is_dir():
         return []
-
-    # Local filenames may use '-' (e.g. mlp-train-00001-of-00007.parquet) while HF split keys use '_'
-    dash_split = split.replace("_", "-")
-    underscore_split = split.replace("-", "_")
-    candidates = []
-    for s in (split, dash_split, underscore_split):
-        if s and s not in candidates:
-            candidates.append(s)
-
-    all_files = []
-    for s in candidates:
-        all_files.extend(sorted(root.glob(f"{s}-*.parquet")))
-
-    # Deduplicate by path
-    all_files = sorted({f for f in all_files})
-
-    single_candidates = []
-    for s in candidates:
-        sp = root / f"{s}.parquet"
-        if sp.exists():
-            single_candidates.append(sp)
-    if single_candidates:
-        for sp in single_candidates:
-            if sp not in all_files:
-                all_files = [sp] + all_files
-
-    if not all_files:
-        all_files = sorted(root.glob("*.parquet"))
-    return all_files
+    dash = split.replace("_", "-")
+    files = sorted(root.glob(f"{dash}-*.parquet"))      
+    if not files:
+        files = sorted(root.glob(f"{split}-*.parquet")) 
+    if not files:
+        files = sorted(root.glob("*.parquet"))          
+    return files
 
 
 class LaTeXOCRParquetMapDataset(Dataset):
@@ -196,48 +175,20 @@ class LaTeXOCRDataset(IterableDataset):
             self.hf_dataset_id = data_source
             from datasets import load_dataset
 
-            try:
-                ds = load_dataset(
-                    self.hf_dataset_id,
-                    split=split,
-                    streaming=True,
-                )
-            except Exception:
-                # HF datasets sometimes disallow '-' in split keys; try normalized alternatives.
-                alt = split.replace("-", "_")
-                if alt != split:
-                    ds = load_dataset(
-                        self.hf_dataset_id,
-                        split=alt,
-                        streaming=True,
-                    )
-                else:
-                    alt2 = split.replace("_", "-")
-                    ds = load_dataset(
-                        self.hf_dataset_id,
-                        split=alt2,
-                        streaming=True,
-                    )
+            safe_split = split.replace("-", "_")
+            ds = load_dataset(self.hf_dataset_id, split=safe_split, streaming=True)
             if world_size > 1:
                 ds = ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
             self.streaming_ds = ds
-            try:
-                from datasets import load_dataset_builder
-
-                builder = load_dataset_builder(self.hf_dataset_id)
-                builder.download_and_prepare()
-                self.num_samples = builder.info.splits[split].num_examples
-            except Exception:
-                self.num_samples = None
+            self.num_samples = None
 
     def _iter_files(self, files):
         from datasets import load_dataset
 
         worker_info = get_worker_info()
-        if worker_info is not None:
-            worker_files = [f for i, f in enumerate(files) if i % worker_info.num_workers == worker_info.id]
-        else:
-            worker_files = files
+        n_workers = worker_info.num_workers if worker_info else 1
+        worker_id = worker_info.id if worker_info else 0
+        worker_files = [f for i, f in enumerate(files) if i % n_workers == worker_id]
         if not worker_files:
             return
         safe_split = self.split.replace("-", "_")
