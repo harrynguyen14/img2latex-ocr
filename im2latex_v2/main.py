@@ -8,7 +8,6 @@ import torch
 from .utils import collate_fn, configure_runtime, setup_distributed
 from .build_datasets import build_datasets, build_dataloader
 from .preprocessor import get_tokenizer
-from .trainer_fsdp import FSDPTrainer
 from .trainer_ddp import DDPTrainer
 
 
@@ -103,7 +102,7 @@ def main():
     train_loader = build_dataloader(train_ds, bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
     val_loader   = build_dataloader(val_ds,   bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
 
-    TrainerCls = FSDPTrainer if args.stage == 1 else DDPTrainer
+    TrainerCls = DDPTrainer
     trainer = TrainerCls(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)
     trainer.train()
 
