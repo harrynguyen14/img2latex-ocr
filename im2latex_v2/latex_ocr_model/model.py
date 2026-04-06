@@ -5,13 +5,27 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from huggingface_hub import snapshot_download
-
 from transformers import AutoTokenizer
 
 from .decoder import QwenCausalDecoder
-from .latexOCR import VisualEncoder
 from .mlp_projector import MLPProjector
 from .encoder import NaViT_Encoder
+
+
+class VisualEncoder(nn.Module):
+    def __init__(self, encoder: NaViT_Encoder, bridge: MLPProjector, max_visual_tokens: int):
+        super().__init__()
+        self.navit = encoder
+        self.projector = bridge
+        self.max_visual_tokens = max_visual_tokens
+
+    def forward(self, batched_images):
+        x, mask = self.navit(batched_images)
+        if x.shape[1] > self.max_visual_tokens:
+            x = x[:, : self.max_visual_tokens]
+            mask = mask[:, : self.max_visual_tokens]
+        x = self.projector(x)
+        return x, mask
 
 
 class LaTeXOCRModel(nn.Module):
@@ -57,20 +71,16 @@ class LaTeXOCRModel(nn.Module):
     def set_train_stage(self, stage: int):
         if stage == 1:
             for p in self.visual_encoder.navit.parameters():
-                p.requires_grad = False
+                p.requires_grad = True
+            for p in self.visual_encoder.projector.parameters():
+                p.requires_grad = True
             for p in self.decoder.parameters():
                 p.requires_grad = False
-            for p in self.visual_encoder.projector.parameters():
-                p.requires_grad = True
         else:
-            # Freeze NaViT
             for p in self.visual_encoder.navit.parameters():
                 p.requires_grad = False
-            # Train projector
             for p in self.visual_encoder.projector.parameters():
                 p.requires_grad = True
-            # Decoder: chỉ set requires_grad cho float params
-            # 4-bit quantized params là integer, không set được
             for p in self.decoder.parameters():
                 if p.dtype in (torch.float32, torch.float16, torch.bfloat16):
                     p.requires_grad = True
@@ -157,8 +167,6 @@ class LaTeXOCRModel(nn.Module):
         model.visual_encoder.load_state_dict(ve, strict=True)
         model.decoder.model.load_state_dict(dec, strict=True)
         if (checkpoint_dir / "tokenizer_config.json").exists():
-            # Some tokenizer families (e.g. Mistral) require `fix_mistral_regex=True`
-            # to avoid incorrect tokenization. Keep a fallback for older transformers.
             try:
                 model.decoder.tokenizer = AutoTokenizer.from_pretrained(
                     str(checkpoint_dir),
@@ -183,14 +191,6 @@ class LaTeXOCRModel(nn.Module):
         cache_dir: str | None = None,
         local_files_only: bool = False,
     ):
-        """
-        Load a LaTeXOCRModel from either a local checkpoint folder or a Hugging Face Hub repo.
-
-        - If `repo_id_or_path` is a local directory containing `config.json` and `model.safetensors`,
-          it is passed directly to `from_checkpoint`.
-        - Otherwise, `snapshot_download` is used to fetch the repo from the Hub, and the
-          downloaded snapshot directory is passed to `from_checkpoint`.
-        """
         p = Path(repo_id_or_path)
         if p.is_dir() and (p / "config.json").is_file() and (p / "model.safetensors").is_file():
             return cls.from_checkpoint(str(p), device=device)
