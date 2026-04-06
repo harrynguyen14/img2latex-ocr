@@ -2,14 +2,14 @@ import contextlib
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from tqdm import tqdm
 
 from .utils import move_batch, wrap_fsdp
-from .latex_ocr_model import LaTeXOCRModel, alignment_loss
+from .latex_ocr_model import LaTeXOCRModel
 from .trainer_base import BaseTrainer, save_training_state, load_training_state
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 
 class FSDPTrainer(BaseTrainer):
@@ -35,8 +35,8 @@ class FSDPTrainer(BaseTrainer):
             self.model.visual_encoder = torch.compile(self.model.visual_encoder, mode="reduce-overhead", fullgraph=False)
             print("[compile] visual_encoder compiled")
 
-        self.raw_model = self.model
-
+        # Wrap FSDP trước, KHÔNG giữ raw_model reference vì FSDP shard in-place
+        # làm weight của submodule gốc thành shape [0] khi gọi ngoài FSDP context.
         if distributed:
             self.model = wrap_fsdp(self.model, self.amp_dtype)
             print("[FSDP] Model wrapped")
@@ -51,6 +51,34 @@ class FSDPTrainer(BaseTrainer):
         if not is_sync and isinstance(self.model, FSDP):
             return self.model.no_sync()
         return contextlib.nullcontext()
+
+    def _alignment_loss_fsdp(self, batched_images, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Stage-1 alignment loss chạy qua FSDP wrapper (self.model) để FSDP
+        unshard weight đúng cách. Không bypass qua raw_model.
+
+        FSDP chỉ wrap LaTeXOCRModel, nên self.model không có forward() nhận
+        batched_images + labels trực tiếp (LaTeXOCRModel.forward() dùng cho stage 2).
+        Ta gọi từng submodule thông qua self.model.module (trỏ về model gốc)
+        nhưng bên trong FSDP context nên weight đã được unshard.
+        """
+        # Với FSDP, dùng self.model.module để truy cập submodule,
+        # nhưng gọi forward của chính FSDP wrapper để trigger unshard đúng cách
+        # bằng cách dùng LaTeXOCRModel._alignment_forward được expose ra.
+        ve, vm = self.model.visual_encoder(batched_images)
+
+        mask = vm.unsqueeze(-1).float()
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        vmean = (ve.float() * mask).sum(dim=1) / denom
+
+        emb = self.model.decoder.get_input_embeddings()
+        valid = labels != -100
+        tgt = emb(labels.clamp(min=0)).float()
+        tgt = tgt * valid.unsqueeze(-1).float()
+        tmean = tgt.sum(dim=1) / valid.sum(dim=1).clamp(min=1).unsqueeze(-1).float()
+
+        y = torch.ones(vmean.shape[0], device=vmean.device)
+        return F.cosine_embedding_loss(vmean, tmean, y)
 
     def train(self):
         args       = self.args
@@ -69,7 +97,7 @@ class FSDPTrainer(BaseTrainer):
                 is_sync = micro == accum - 1
 
                 with self._no_sync_ctx(is_sync):
-                    loss = alignment_loss(self.raw_model, batch["batched_images"], batch["labels"]) / accum
+                    loss = self._alignment_loss_fsdp(batch["batched_images"], batch["labels"]) / accum
                     loss.backward()
                     torch.cuda.empty_cache()
 

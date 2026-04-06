@@ -19,7 +19,14 @@ class LayerNorm(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        return self.norm(x.float()).to(x.dtype)
+        # Cast weight/bias sang float32 cùng với input để tránh dtype mismatch
+        # khi FSDP hoặc AMP đã cast parameter sang bf16/fp16.
+        import torch.nn.functional as _F
+        orig_dtype = x.dtype
+        w = self.norm.weight.float() if self.norm.weight is not None else None
+        b = self.norm.bias.float() if self.norm.bias is not None else None
+        out = _F.layer_norm(x.float(), self.norm.normalized_shape, w, b, self.norm.eps)
+        return out.to(orig_dtype)
 
 class RMSNorm(nn.Module):
     def __init__(self, heads, dim):
