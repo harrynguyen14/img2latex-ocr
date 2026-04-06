@@ -194,11 +194,18 @@ def main():
             val_ds, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
         )
 
-    model = LaTeXOCRModel(cfg).to(device)
+    model = LaTeXOCRModel(cfg)
+    model.visual_encoder = model.visual_encoder.to(device)
+
     resume_dir = Path(args.resume).resolve() if args.resume else None
     if resume_dir is not None and resume_dir.is_dir():
-        ck = LaTeXOCRModel.from_checkpoint(str(resume_dir), device=str(device))
-        model.load_state_dict(ck.state_dict(), strict=True)
+        from safetensors.torch import load_file
+        import json
+        raw = load_file(str(resume_dir / "model.safetensors"), device=str(device))
+        ve_state = {k.replace("visual_encoder.", ""): v 
+                    for k, v in raw.items() if k.startswith("visual_encoder.")}
+        model.visual_encoder.load_state_dict(ve_state, strict=True)
+        print("[resume] Loaded visual_encoder weights from stage1 checkpoint")
 
     if stage == 2:
         model.decoder.apply_lora()
