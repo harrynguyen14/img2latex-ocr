@@ -87,6 +87,27 @@ class LaTeXOCRModel(nn.Module):
                 if p.dtype in (torch.float32, torch.float16, torch.bfloat16):
                     p.requires_grad = True
 
+    def stage1_forward(self, batched_images, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Stage-1 alignment loss chạy hoàn toàn bên trong FSDP forward context.
+        Trả về scalar loss để trainer có thể gọi .backward().
+        Không bao giờ gọi trực tiếp submodule ngoài FSDP wrapper.
+        """
+        import torch.nn.functional as F
+        ve, vm = self.visual_encoder(batched_images)
+        mask  = vm.unsqueeze(-1).float()
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        vmean = (ve.float() * mask).sum(dim=1) / denom
+
+        emb   = self.decoder.get_input_embeddings()
+        valid = labels != -100
+        tgt   = emb(labels.clamp(min=0)).float()
+        tgt   = tgt * valid.unsqueeze(-1).float()
+        tmean = tgt.sum(dim=1) / valid.sum(dim=1).clamp(min=1).unsqueeze(-1).float()
+
+        y = torch.ones(vmean.shape[0], device=vmean.device)
+        return F.cosine_embedding_loss(vmean, tmean, y)
+
     def forward(
         self,
         batched_images,

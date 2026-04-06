@@ -13,19 +13,32 @@ def divisible_by(numer, denom):
     return (numer % denom) == 0
 
 class LayerNorm(nn.Module):
+    """
+    LayerNorm với float32 upcast, tương thích FSDP.
+
+    Lý do không dùng nn.LayerNorm wrapped: FSDP shard parameter của
+    submodule nested (norm.weight, norm.bias) — khi forward() được gọi,
+    các parameter đó có shape [0] trên rank không sở hữu shard.
+    Bằng cách khai báo weight/bias là parameter TRỰC TIẾP của module này
+    (không nested), FSDP unshard chúng đúng cách trước khi vào forward().
+    """
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.norm = nn.LayerNorm(dim)
+        self.normalized_shape = (dim,)
+        self.eps = 1e-5
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias   = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        # Cast weight/bias sang float32 cùng với input để tránh dtype mismatch
-        # khi FSDP hoặc AMP đã cast parameter sang bf16/fp16.
-        import torch.nn.functional as _F
         orig_dtype = x.dtype
-        w = self.norm.weight.float() if self.norm.weight is not None else None
-        b = self.norm.bias.float() if self.norm.bias is not None else None
-        out = _F.layer_norm(x.float(), self.norm.normalized_shape, w, b, self.norm.eps)
+        out = F.layer_norm(
+            x.float(),
+            self.normalized_shape,
+            self.weight.float(),
+            self.bias.float(),
+            self.eps,
+        )
         return out.to(orig_dtype)
 
 class RMSNorm(nn.Module):

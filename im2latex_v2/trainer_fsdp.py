@@ -2,19 +2,20 @@ import contextlib
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from tqdm import tqdm
 
 from .utils import move_batch, wrap_fsdp
 from .latex_ocr_model import LaTeXOCRModel
-from .trainer_base import BaseTrainer, save_training_state, load_training_state
+from .trainer_base import BaseTrainer, save_training_state
 
 
 class FSDPTrainer(BaseTrainer):
-    def __init__(self, args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size):
-        super().__init__(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)
+    def __init__(self, args, train_loader, val_loader, device, tokenizer,
+                 distributed, rank, local_rank, world_size):
+        super().__init__(args, train_loader, val_loader, device, tokenizer,
+                         distributed, rank, local_rank, world_size)
 
         self.model = LaTeXOCRModel(args)
         self.model.to(device)
@@ -24,7 +25,11 @@ class FSDPTrainer(BaseTrainer):
             model_pt = resume_dir / "model.pt"
             if model_pt.is_file():
                 state = torch.load(str(model_pt), map_location=device, weights_only=False)
-                ve_state = {k.replace("visual_encoder.", ""): v for k, v in state.items() if k.startswith("visual_encoder.")}
+                ve_state = {
+                    k.replace("visual_encoder.", ""): v
+                    for k, v in state.items()
+                    if k.startswith("visual_encoder.")
+                }
                 self.model.visual_encoder.load_state_dict(ve_state, strict=True)
                 print("[resume] Loaded visual_encoder weights")
 
@@ -32,11 +37,14 @@ class FSDPTrainer(BaseTrainer):
         self.model = self.model.to(dtype=self.amp_dtype)
 
         if args.torch_compile and hasattr(torch, "compile") and device.type == "cuda":
-            self.model.visual_encoder = torch.compile(self.model.visual_encoder, mode="reduce-overhead", fullgraph=False)
+            self.model.visual_encoder = torch.compile(
+                self.model.visual_encoder, mode="reduce-overhead", fullgraph=False
+            )
             print("[compile] visual_encoder compiled")
 
-        # Wrap FSDP trước, KHÔNG giữ raw_model reference vì FSDP shard in-place
-        # làm weight của submodule gốc thành shape [0] khi gọi ngoài FSDP context.
+        # QUAN TRỌNG: wrap FSDP sau cùng. KHÔNG giữ raw_model reference vì
+        # FSDP shard parameter in-place — mọi reference đến submodule gốc
+        # sẽ thấy weight shape [0] khi gọi ngoài FSDP forward context.
         if distributed:
             self.model = wrap_fsdp(self.model, self.amp_dtype)
             print("[FSDP] Model wrapped")
@@ -52,40 +60,13 @@ class FSDPTrainer(BaseTrainer):
             return self.model.no_sync()
         return contextlib.nullcontext()
 
-    def _alignment_loss_fsdp(self, batched_images, labels: torch.Tensor) -> torch.Tensor:
-        """
-        Stage-1 alignment loss chạy qua FSDP wrapper (self.model) để FSDP
-        unshard weight đúng cách. Không bypass qua raw_model.
-
-        FSDP chỉ wrap LaTeXOCRModel, nên self.model không có forward() nhận
-        batched_images + labels trực tiếp (LaTeXOCRModel.forward() dùng cho stage 2).
-        Ta gọi từng submodule thông qua self.model.module (trỏ về model gốc)
-        nhưng bên trong FSDP context nên weight đã được unshard.
-        """
-        # Với FSDP, dùng self.model.module để truy cập submodule,
-        # nhưng gọi forward của chính FSDP wrapper để trigger unshard đúng cách
-        # bằng cách dùng LaTeXOCRModel._alignment_forward được expose ra.
-        ve, vm = self.model.visual_encoder(batched_images)
-
-        mask = vm.unsqueeze(-1).float()
-        denom = mask.sum(dim=1).clamp(min=1.0)
-        vmean = (ve.float() * mask).sum(dim=1) / denom
-
-        emb = self.model.decoder.get_input_embeddings()
-        valid = labels != -100
-        tgt = emb(labels.clamp(min=0)).float()
-        tgt = tgt * valid.unsqueeze(-1).float()
-        tmean = tgt.sum(dim=1) / valid.sum(dim=1).clamp(min=1).unsqueeze(-1).float()
-
-        y = torch.ones(vmean.shape[0], device=vmean.device)
-        return F.cosine_embedding_loss(vmean, tmean, y)
-
     def train(self):
         args       = self.args
         accum      = args.grad_accum
         micro      = 0
         accum_loss = 0.0
-        pbar       = tqdm(total=self.total_steps, initial=self.global_step, disable=not self.is_master)
+        pbar = tqdm(total=self.total_steps, initial=self.global_step,
+                    disable=not self.is_master)
 
         self.model.train()
         while self.global_step < self.total_steps:
@@ -97,7 +78,13 @@ class FSDPTrainer(BaseTrainer):
                 is_sync = micro == accum - 1
 
                 with self._no_sync_ctx(is_sync):
-                    loss = self._alignment_loss_fsdp(batch["batched_images"], batch["labels"]) / accum
+                    # stage1_forward() là method của LaTeXOCRModel — FSDP sẽ
+                    # unshard tất cả parameter trước khi dispatch vào method này,
+                    # giống hệt cách nó unshard cho forward(). Đây là cách
+                    # duy nhất an toàn với FSDP.
+                    loss = self.model.stage1_forward(
+                        batch["batched_images"], batch["labels"]
+                    ) / accum
                     loss.backward()
                     torch.cuda.empty_cache()
 
@@ -114,7 +101,8 @@ class FSDPTrainer(BaseTrainer):
                     grad_norm = args.max_grad_norm
                 else:
                     grad_norm = torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.model.parameters() if p.requires_grad], args.max_grad_norm
+                        [p for p in self.model.parameters() if p.requires_grad],
+                        args.max_grad_norm,
                     )
                     if isinstance(grad_norm, torch.Tensor):
                         grad_norm = grad_norm.item()
