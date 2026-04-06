@@ -57,7 +57,7 @@ train:
   eval_samples: 200
 
 paths:
-  ckpt_dir: "/kaggle/input/models/harrynguyen36/mlp/pytorch/default/1/kaggle/working/checkpoints"
+  ckpt_dir: "/kaggle/working/checkpoints"
 
 eval:
   max_new_tokens: 256
