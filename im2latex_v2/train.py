@@ -220,8 +220,11 @@ def main():
     best_bleu = -1.0
     ts = load_training_state(resume_dir, device) if resume_dir else None
     if ts is not None:
-        opt.load_state_dict(ts["optimizer"])
-        global_step = int(ts["global_step"])
+        try:
+            opt.load_state_dict(ts["optimizer"])
+        except ValueError:
+            print("[resume] Optimizer param groups mismatch — skipping optimizer state (cross-stage resume)")
+        global_step = int(ts.get("global_step", 0))
         best_bleu = float(ts.get("best_bleu", -1.0))
 
     bs = int(cfg["batch_size"])
