@@ -16,11 +16,10 @@ class LayerNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.bias = nn.Parameter(torch.zeros(dim))
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        return F.layer_norm(x, (self.dim,), self.weight.to(x.dtype), self.bias.to(x.dtype))
+        return self.norm(x.float()).to(x.dtype)
 
 class RMSNorm(nn.Module):
     def __init__(self, heads, dim):
@@ -251,7 +250,8 @@ class NaViT_Encoder(nn.Module):
         max_len = patches.shape[1]
         mask = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
 
-        x = self.to_patch_embedding(patches)
+        param_dtype = next(self.parameters()).dtype
+        x = self.to_patch_embedding(patches.to(param_dtype))
 
         h_idx, w_idx = patch_positions.unbind(dim=-1)
 
