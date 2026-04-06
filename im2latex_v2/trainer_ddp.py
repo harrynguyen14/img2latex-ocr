@@ -1,23 +1,20 @@
 import contextlib
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from .utils import move_batch
-from .latex_ocr_model import LaTeXOCRModel, alignment_loss
-from .trainer_base import BaseTrainer, save_training_state, run_eval
+from .latex_ocr_model import LaTeXOCRModel
+from .trainer_base import BaseTrainer, save_training_state, load_training_state, run_eval
 from .evaluate import print_metrics
 
 
 class DDPTrainer(BaseTrainer):
-    def __init__(self, args, train_loader, val_loader, device, tokenizer,
-                 distributed, rank, local_rank, world_size):
-        super().__init__(args, train_loader, val_loader, device, tokenizer,
-                         distributed, rank, local_rank, world_size)
+    def __init__(self, args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size):
+        super().__init__(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)
 
         self.model = LaTeXOCRModel(args)
 
@@ -26,28 +23,24 @@ class DDPTrainer(BaseTrainer):
             model_pt = resume_dir / "model.pt"
             if model_pt.is_file():
                 state = torch.load(str(model_pt), map_location="cpu", weights_only=False)
-                ve_state = {
-                    k.replace("visual_encoder.", ""): v
-                    for k, v in state.items()
-                    if k.startswith("visual_encoder.")
-                }
+                ve_state = {k.replace("visual_encoder.", ""): v for k, v in state.items() if k.startswith("visual_encoder.")}
                 self.model.visual_encoder.load_state_dict(ve_state, strict=True)
                 print("[resume] Loaded visual_encoder weights from stage1 checkpoint")
 
-        # LoRA chỉ áp dụng ở stage 2
-        if args.stage == 2:
-            self.model.decoder.apply_lora()
-            print("[stage2] LoRA applied to decoder")
+        self.model.decoder.apply_lora()
+        print("[stage2] LoRA applied to decoder")
 
         self.model.set_train_stage(args.stage)
 
-        if args.gradient_checkpointing and args.stage == 2:
+        if args.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        # Stage 1: chỉ visual_encoder cần grad → chỉ wrap visual_encoder với DDP
-        # Stage 2: visual_encoder frozen, decoder (LoRA) train → wrap visual_encoder
-        #          cho đồng bộ, decoder (quantized) không wrap DDP
         self.model.visual_encoder = self.model.visual_encoder.to(device)
+        # Decoder ở stage 1 load bình thường (không 4-bit) và nằm trên CPU.
+        # alignment_loss gọi get_input_embeddings() nên embedding weight phải
+        # cùng device với labels (cuda). Stage 2 dùng device_map="auto" nên bỏ qua.
+        if args.stage == 1:
+            self.model.decoder.model = self.model.decoder.model.to(device)
 
         if distributed:
             self.model.visual_encoder = DDP(
@@ -55,14 +48,9 @@ class DDPTrainer(BaseTrainer):
                 device_ids=[local_rank],
                 find_unused_parameters=False,
             )
-            print(f"[DDP] visual_encoder wrapped (stage{args.stage})")
+            print("[DDP] visual_encoder wrapped")
 
-        # ve_module: reference đến module thực (bỏ qua DDP wrapper) để save checkpoint
-        self.ve_module = (
-            self.model.visual_encoder.module
-            if isinstance(self.model.visual_encoder, DDP)
-            else self.model.visual_encoder
-        )
+        self.ve_module = self.model.visual_encoder.module if isinstance(self.model.visual_encoder, DDP) else self.model.visual_encoder
 
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         self._build_optimizer(trainable)
@@ -75,30 +63,12 @@ class DDPTrainer(BaseTrainer):
             return self.model.visual_encoder.no_sync()
         return contextlib.nullcontext()
 
-    def _forward_loss(self, batch) -> torch.Tensor:
-        """Tính loss theo stage."""
-        if self.args.stage == 1:
-            return alignment_loss(self.model, batch["batched_images"], batch["labels"])
-        else:
-            with torch.amp.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.device.type == "cuda",
-            ):
-                return self.model(
-                    batch["batched_images"],
-                    batch["input_ids"],
-                    batch["attention_mask"],
-                    batch["labels"],
-                ).loss
-
     def train(self):
         args       = self.args
         accum      = args.grad_accum
         micro      = 0
         accum_loss = 0.0
-        pbar = tqdm(total=self.total_steps, initial=self.global_step,
-                    disable=not self.is_master)
+        pbar       = tqdm(total=self.total_steps, initial=self.global_step, disable=not self.is_master)
 
         self.model.train()
         while self.global_step < self.total_steps:
@@ -110,7 +80,13 @@ class DDPTrainer(BaseTrainer):
                 is_sync = micro == accum - 1
 
                 with self._no_sync_ctx(is_sync):
-                    loss = self._forward_loss(batch) / accum
+                    with torch.amp.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.device.type == "cuda"):
+                        loss = self.model(
+                            batch["batched_images"],
+                            batch["input_ids"],
+                            batch["attention_mask"],
+                            batch["labels"],
+                        ).loss / accum
                     loss.backward()
                     torch.cuda.empty_cache()
 
@@ -123,8 +99,7 @@ class DDPTrainer(BaseTrainer):
                 t = self._step_lr()
 
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad],
-                    args.max_grad_norm,
+                    [p for p in self.model.parameters() if p.requires_grad], args.max_grad_norm
                 )
                 if isinstance(grad_norm, torch.Tensor):
                     grad_norm = grad_norm.item()
@@ -142,7 +117,7 @@ class DDPTrainer(BaseTrainer):
                     )
                 accum_loss = 0.0
 
-                if self.global_step % args.eval_steps == 0 and args.stage == 2:
+                if self.global_step % args.eval_steps == 0:
                     self._eval_and_save()
 
                 if self.global_step % args.save_steps == 0:
@@ -168,12 +143,12 @@ class DDPTrainer(BaseTrainer):
     def _save(self, path: Path):
         if self.is_master:
             path.mkdir(parents=True, exist_ok=True)
+            ve = self.ve_module.state_dict()
+            dec = self.model.decoder.model.state_dict()
             state = {}
-            for k, v in self.ve_module.state_dict().items():
+            for k, v in ve.items():
                 state[f"visual_encoder.{k}"] = v.cpu()
-            # Stage 2: lưu thêm decoder (LoRA weights nằm trong đây)
-            if self.args.stage == 2:
-                for k, v in self.model.decoder.model.state_dict().items():
-                    state[f"decoder.model.{k}"] = v.cpu()
+            for k, v in dec.items():
+                state[f"decoder.model.{k}"] = v.cpu()
             torch.save(state, path / "model.pt")
             save_training_state(path, self.opt, self.global_step, self.best_bleu)
