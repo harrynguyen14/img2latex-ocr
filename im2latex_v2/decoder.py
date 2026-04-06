@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import get_peft_model, LoraConfig, TaskType
 
 
 def _dtype_from_str(name: str):
@@ -27,7 +26,9 @@ class QwenCausalDecoder(nn.Module):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Thêm LoRA
+    def apply_lora(self):
+        """Gọi sau khi load weights xong."""
+        from peft import get_peft_model, LoraConfig, TaskType
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=16,
@@ -42,13 +43,7 @@ class QwenCausalDecoder(nn.Module):
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        labels: torch.Tensor | None = None,
-        **kwargs,
-    ):
+    def forward(self, inputs_embeds=None, attention_mask=None, labels=None, **kwargs):
         return self.model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -57,15 +52,8 @@ class QwenCausalDecoder(nn.Module):
         )
 
     @torch.no_grad()
-    def generate(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        max_new_tokens: int,
-        num_beams: int,
-        pad_token_id: int,
-        eos_token_id: int,
-    ):
+    def generate(self, inputs_embeds, attention_mask, max_new_tokens,
+                 num_beams, pad_token_id, eos_token_id):
         return self.model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,

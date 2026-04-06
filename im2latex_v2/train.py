@@ -200,6 +200,10 @@ def main():
         ck = LaTeXOCRModel.from_checkpoint(str(resume_dir), device=str(device))
         model.load_state_dict(ck.state_dict(), strict=True)
 
+    if stage == 2:
+        model.decoder.apply_lora()
+        print("[stage2] LoRA applied to decoder")
+
     model.set_train_stage(stage)
 
     if cfg.get("gradient_checkpointing", False) and stage == 2:
