@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from tqdm import tqdm
 
 from .collator import LaTeXOCRCollator
@@ -85,7 +85,7 @@ def build_dataloader(
         "num_workers": nw,
         "collate_fn": collate_fn,
         "pin_memory": pin,
-        "shuffle": shuffle if sampler is None else False,
+        "shuffle": shuffle if (sampler is None and not isinstance(ds, IterableDataset)) else False,
         "sampler": sampler,
     }
     if nw > 0:
@@ -209,7 +209,7 @@ def main():
         model = torch.compile(model, mode="reduce-overhead")
 
     if distributed:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=(stage == 2))
 
     module = model.module if isinstance(model, DDP) else model
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -231,7 +231,7 @@ def main():
     nw = int(cfg["num_workers"])
     prefetch = int(cfg.get("prefetch_factor", 2))
     persistent = bool(cfg.get("persistent_workers", True)) and nw > 0
-    train_shuffle = train_sampler is None and not distributed
+    train_shuffle = train_sampler is None and not distributed and not isinstance(train_ds, IterableDataset)
     val_shuffle = False
     train_loader = build_dataloader(
         train_ds,
