@@ -52,6 +52,9 @@ class FSDPTrainer(BaseTrainer):
 
         self.model.set_train_stage(args.stage)
 
+        # Cast toàn bộ model sang amp_dtype để đảm bảo uniform dtype trước khi FSDP flatten.
+        # LoRA layers mặc định tạo ra float32 params — phải cast sau apply_lora().
+        self.model = self.model.to(dtype=self.amp_dtype)
         # Move toàn bộ model lên GPU trước khi wrap FSDP
         self.model = self.model.to(device)
 
