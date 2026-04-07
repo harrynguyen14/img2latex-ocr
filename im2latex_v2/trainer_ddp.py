@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from .utils import move_batch
 from .latex_ocr_model import LaTeXOCRModel, alignment_loss
-from .trainer_base import BaseTrainer, save_training_state, run_eval
+from .trainer_base import BaseTrainer, save_training_state, load_training_state, run_eval
 from .evaluate import print_metrics
 
 
@@ -68,8 +68,23 @@ class DDPTrainer(BaseTrainer):
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         self._build_optimizer(trainable)
 
-        if resume_dir:
-            self._resume(resume_dir)
+        # Chỉ load global_step khi resume CÙNG stage.
+        # Nếu cross-stage (vd: resume stage1/final để train stage2)
+        # thì chỉ lấy model weights ở trên, reset global_step=0.
+        if resume_dir is not None and resume_dir.is_dir():
+            ts = load_training_state(resume_dir, device)
+            if ts:
+                is_same_stage = f"stage{args.stage}" in str(resume_dir)
+                if is_same_stage:
+                    try:
+                        self.opt.load_state_dict(ts["optimizer"])
+                    except ValueError:
+                        print("[resume] Optimizer mismatch — skipping optimizer state")
+                    self.global_step = int(ts.get("global_step", 0))
+                    self.best_bleu   = float(ts.get("best_bleu", -1.0))
+                    print(f"[resume] Restored global_step={self.global_step}")
+                else:
+                    print("[resume] Cross-stage — resetting global_step=0")
 
     def _no_sync_ctx(self, is_sync: bool):
         if not is_sync and isinstance(self.model.visual_encoder, DDP):
