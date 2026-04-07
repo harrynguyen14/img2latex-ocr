@@ -69,14 +69,15 @@ def apply_2d_rope(q, k, h_idx, w_idx):
     q_h, q_w = q[..., :dim_half], q[..., dim_half:]
     k_h, k_w = k[..., :dim_half], k[..., dim_half:]
 
+    dtype = q.dtype
     freq_seq = torch.arange(dim_quarter, device=device).float()
     inv_freq = 1.0 / (10000 ** (freq_seq / dim_quarter))
 
     h_theta = h_idx[..., None].float() * inv_freq
     w_theta = w_idx[..., None].float() * inv_freq
 
-    sin_h, cos_h = h_theta.sin(), h_theta.cos()
-    sin_w, cos_w = w_theta.sin(), w_theta.cos()
+    sin_h, cos_h = h_theta.sin().to(dtype), h_theta.cos().to(dtype)
+    sin_w, cos_w = w_theta.sin().to(dtype), w_theta.cos().to(dtype)
 
     # Expand (dim_quarter) -> (dim_half) to match x's last-dim.
     # `rope()` multiplies elementwise with `x`, so sin/cos must have the same
