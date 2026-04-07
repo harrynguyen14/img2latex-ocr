@@ -19,15 +19,22 @@ class QwenCausalDecoder(nn.Module):
         stage = config.get("stage", 2)
         trainer = config.get("trainer", "ddp")
 
-        if stage == 1 or trainer == "fsdp":
-            # FSDP stage 2: load bình thường (bf16), để FSDP shard sau
+        if stage == 1:
             self.model = AutoModelForCausalLM.from_pretrained(
                 name,
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+            )
+        elif trainer == "fsdp" or trainer == "ddp_multiGPU":
+            # Multi-GPU stage 2: load bf16 không dùng device_map,
+            # để trainer tự đặt lên đúng GPU
+            self.model = AutoModelForCausalLM.from_pretrained(
+                name,
+                dtype=torch.bfloat16,
                 trust_remote_code=True,
             )
         else:
-            # DDP stage 2: dùng 4-bit quantization + device_map="auto"
+            # DDP single-GPU stage 2: dùng 4-bit quantization
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
