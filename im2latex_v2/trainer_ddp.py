@@ -128,7 +128,6 @@ class DDPTrainer(BaseTrainer):
                 with self._no_sync_ctx(is_sync):
                     loss = self._forward_loss(batch) / accum
                     loss.backward()
-                    torch.cuda.empty_cache()
 
                 accum_loss += loss.item()
                 micro += 1
