@@ -8,7 +8,8 @@ from tqdm import tqdm
 
 from .utils import move_batch, wrap_fsdp
 from .latex_ocr_model import LaTeXOCRModel
-from .trainer_base import BaseTrainer, save_training_state
+from .trainer_base import BaseTrainer, save_training_state, load_training_state, run_eval
+from .evaluate import print_metrics
 
 
 class FSDPTrainer(BaseTrainer):
@@ -18,23 +19,41 @@ class FSDPTrainer(BaseTrainer):
                          distributed, rank, local_rank, world_size)
 
         self.model = LaTeXOCRModel(args)
-        self.model.to(device)
 
         resume_dir = Path(args.resume).resolve() if args.resume else None
         if resume_dir is not None and resume_dir.is_dir():
             model_pt = resume_dir / "model.pt"
             if model_pt.is_file():
-                state = torch.load(str(model_pt), map_location=device, weights_only=False)
+                state = torch.load(str(model_pt), map_location="cpu", weights_only=False)
                 ve_state = {
                     k.replace("visual_encoder.", ""): v
                     for k, v in state.items()
                     if k.startswith("visual_encoder.")
                 }
-                self.model.visual_encoder.load_state_dict(ve_state, strict=True)
-                print("[resume] Loaded visual_encoder weights")
+                if ve_state:
+                    self.model.visual_encoder.load_state_dict(ve_state, strict=True)
+                    print("[resume] Loaded visual_encoder weights")
+                # Nếu resume cùng stage 2 (có decoder weights), load luôn
+                dec_state = {
+                    k.replace("decoder.model.", ""): v
+                    for k, v in state.items()
+                    if k.startswith("decoder.model.")
+                }
+                if dec_state:
+                    self.model.decoder.model.load_state_dict(dec_state, strict=False)
+                    print("[resume] Loaded decoder weights")
+
+        # Stage 2: apply LoRA (không dùng QLoRA vì FSDP không compatible với 4-bit)
+        if args.stage == 2:
+            self.model.decoder.apply_lora(use_qlora=False)
+            print("[stage2] LoRA applied to decoder (plain LoRA for FSDP)")
+            if args.gradient_checkpointing:
+                self.model.gradient_checkpointing_enable()
 
         self.model.set_train_stage(args.stage)
-        self.model = self.model.to(dtype=self.amp_dtype)
+
+        # Move toàn bộ model lên GPU trước khi wrap FSDP
+        self.model = self.model.to(device)
 
         if args.torch_compile and hasattr(torch, "compile") and device.type == "cuda":
             self.model.visual_encoder = torch.compile(
@@ -42,9 +61,7 @@ class FSDPTrainer(BaseTrainer):
             )
             print("[compile] visual_encoder compiled")
 
-        # QUAN TRỌNG: wrap FSDP sau cùng. KHÔNG giữ raw_model reference vì
-        # FSDP shard parameter in-place — mọi reference đến submodule gốc
-        # sẽ thấy weight shape [0] khi gọi ngoài FSDP forward context.
+        # FSDP wrap sau cùng — không giữ reference đến submodule gốc
         if distributed:
             self.model = wrap_fsdp(self.model, self.amp_dtype)
             print("[FSDP] Model wrapped")
@@ -52,13 +69,44 @@ class FSDPTrainer(BaseTrainer):
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         self._build_optimizer(trainable)
 
-        if resume_dir:
-            self._resume(resume_dir)
+        # Resume: chỉ restore global_step nếu cùng stage
+        if resume_dir is not None and resume_dir.is_dir():
+            ts = load_training_state(resume_dir, device)
+            if ts:
+                is_same_stage = f"stage{args.stage}" in str(resume_dir)
+                if is_same_stage:
+                    try:
+                        self.opt.load_state_dict(ts["optimizer"])
+                    except ValueError:
+                        print("[resume] Optimizer mismatch — skipping optimizer state")
+                    self.global_step = int(ts.get("global_step", 0))
+                    self.best_bleu   = float(ts.get("best_bleu", -1.0))
+                    print(f"[resume] Restored global_step={self.global_step}")
+                else:
+                    print("[resume] Cross-stage — resetting global_step=0")
 
     def _no_sync_ctx(self, is_sync: bool):
         if not is_sync and isinstance(self.model, FSDP):
             return self.model.no_sync()
         return contextlib.nullcontext()
+
+    def _forward_loss(self, batch) -> torch.Tensor:
+        if self.args.stage == 1:
+            # stage1_forward là method của LaTeXOCRModel — FSDP dispatch an toàn
+            return self.model.stage1_forward(
+                batch["batched_images"], batch["labels"]
+            )
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.amp_dtype,
+            enabled=self.device.type == "cuda",
+        ):
+            return self.model(
+                batch["batched_images"],
+                batch["input_ids"],
+                batch["attention_mask"],
+                batch["labels"],
+            ).loss
 
     def train(self):
         args       = self.args
@@ -78,15 +126,8 @@ class FSDPTrainer(BaseTrainer):
                 is_sync = micro == accum - 1
 
                 with self._no_sync_ctx(is_sync):
-                    # stage1_forward() là method của LaTeXOCRModel — FSDP sẽ
-                    # unshard tất cả parameter trước khi dispatch vào method này,
-                    # giống hệt cách nó unshard cho forward(). Đây là cách
-                    # duy nhất an toàn với FSDP.
-                    loss = self.model.stage1_forward(
-                        batch["batched_images"], batch["labels"]
-                    ) / accum
+                    loss = self._forward_loss(batch) / accum
                     loss.backward()
-                    torch.cuda.empty_cache()
 
                 accum_loss += loss.item()
                 micro += 1
@@ -120,6 +161,10 @@ class FSDPTrainer(BaseTrainer):
                     )
                 accum_loss = 0.0
 
+                # Eval chỉ ở stage 2
+                if self.global_step % args.eval_steps == 0 and args.stage == 2:
+                    self._eval_and_save()
+
                 if self.global_step % args.save_steps == 0:
                     self._save(self.ckpt_dir / f"step-{self.global_step}")
 
@@ -129,15 +174,32 @@ class FSDPTrainer(BaseTrainer):
         self._barrier()
         self._cleanup()
 
+    def _eval_and_save(self):
+        self._barrier()
+        if self.is_master:
+            mb   = max(self.args.eval_samples // self.args.batch_size, 1)
+            mets = run_eval(self.model, self.val_loader, self.device, self.tokenizer, mb)
+            print_metrics(mets, prefix=f"step {self.global_step}")
+            if mets["bleu4"] > self.best_bleu:
+                self.best_bleu = mets["bleu4"]
+                self._save(self.ckpt_dir / "best")
+        self._barrier()
+
     def _save(self, path: Path):
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         if isinstance(self.model, FSDP):
             with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, cfg):
-                state = self.model.state_dict()
+                full_state = self.model.state_dict()
         else:
-            state = self.model.state_dict()
+            full_state = self.model.state_dict()
 
         if self.is_master:
             path.mkdir(parents=True, exist_ok=True)
-            torch.save(state, path / "model.pt")
+            save_state = {}
+            for k, v in full_state.items():
+                if k.startswith("visual_encoder."):
+                    save_state[k] = v.cpu()
+                elif self.args.stage == 2 and k.startswith("decoder."):
+                    save_state[k] = v.cpu()
+            torch.save(save_state, path / "model.pt")
             save_training_state(path, self.opt, self.global_step, self.best_bleu)

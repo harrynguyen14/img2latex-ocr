@@ -34,8 +34,8 @@ class DDPTrainer(BaseTrainer):
 
         # LoRA và gradient checkpointing chỉ dùng ở stage 2
         if args.stage == 2:
-            self.model.decoder.apply_lora()
-            print("[stage2] LoRA applied to decoder")
+            self.model.decoder.apply_lora(use_qlora=True)
+            print("[stage2] LoRA applied to decoder (QLoRA)")
             if args.gradient_checkpointing:
                 self.model.gradient_checkpointing_enable()
 

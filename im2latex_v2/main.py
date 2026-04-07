@@ -9,6 +9,7 @@ from .utils import collate_fn, configure_runtime, setup_distributed
 from .build_datasets import build_datasets, build_dataloader
 from .preprocessor import get_tokenizer
 from .trainer_ddp import DDPTrainer
+from .trainer_fsdp import FSDPTrainer
 
 
 def parse_args():
@@ -63,6 +64,7 @@ def parse_args():
 
     ap.add_argument("--ckpt_dir",                    type=str,   default="/kaggle/working/checkpoints")
     ap.add_argument("--resume",                      type=str,   default=None)
+    ap.add_argument("--trainer",                     type=str,   default="ddp", choices=["ddp", "fsdp"])
 
     ap.add_argument("--max_new_tokens",              type=int,   default=200)
     ap.add_argument("--num_beams",                   type=int,   default=4)
@@ -102,7 +104,7 @@ def main():
     train_loader = build_dataloader(train_ds, bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
     val_loader   = build_dataloader(val_ds,   bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
 
-    TrainerCls = DDPTrainer
+    TrainerCls = FSDPTrainer if args.trainer == "fsdp" else DDPTrainer
     trainer = TrainerCls(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)
     trainer.train()
 

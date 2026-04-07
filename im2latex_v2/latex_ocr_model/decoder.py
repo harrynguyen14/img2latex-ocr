@@ -17,14 +17,17 @@ class QwenCausalDecoder(nn.Module):
         self.config = config
         name = config["tokenizer_name"]
         stage = config.get("stage", 2)
+        trainer = config.get("trainer", "ddp")
 
-        if stage == 1:
+        if stage == 1 or trainer == "fsdp":
+            # FSDP stage 2: load bình thường (bf16), để FSDP shard sau
             self.model = AutoModelForCausalLM.from_pretrained(
                 name,
-                dtype=torch.bfloat16,
+                torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
             )
         else:
+            # DDP stage 2: dùng 4-bit quantization + device_map="auto"
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -42,13 +45,8 @@ class QwenCausalDecoder(nn.Module):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    def apply_lora(self):
-        from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
-        # Cần prepare trước khi apply LoRA với quantized model
-        self.model = prepare_model_for_kbit_training(
-            self.model,
-            use_gradient_checkpointing=False,
-        )
+    def apply_lora(self, use_qlora: bool = True):
+        from peft import get_peft_model, LoraConfig, TaskType
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=16,
@@ -57,6 +55,12 @@ class QwenCausalDecoder(nn.Module):
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
             bias="none",
         )
+        if use_qlora:
+            from peft import prepare_model_for_kbit_training
+            self.model = prepare_model_for_kbit_training(
+                self.model,
+                use_gradient_checkpointing=False,
+            )
         self.model = get_peft_model(self.model, lora_cfg)
         self.model.print_trainable_parameters()
 
