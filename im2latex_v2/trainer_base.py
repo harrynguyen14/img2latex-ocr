@@ -35,7 +35,7 @@ def run_eval(model, loader, device, tokenizer, max_batches: int):
         if i >= max_batches:
             break
         batch = move_batch(batch, device)
-        pr = model.generate(batch["batched_images"])
+        pr = model.generate(batch["batched_images"], num_beams=1)
         preds.extend(pr)
         lid = batch["labels"].cpu().numpy()
         lid = np.where(lid == -100, tokenizer.pad_token_id, lid)

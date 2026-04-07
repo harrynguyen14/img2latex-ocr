@@ -52,7 +52,7 @@ def parse_args():
     ap.add_argument("--log_steps",                   type=int,   default=50)
     ap.add_argument("--eval_steps",                  type=int,   default=500)
     ap.add_argument("--save_steps",                  type=int,   default=10000)
-    ap.add_argument("--eval_samples",                type=int,   default=200)
+    ap.add_argument("--eval_samples",                type=int,   default=64)
     ap.add_argument("--num_workers",                 type=int,   default=1)
     ap.add_argument("--prefetch_factor",             type=int,   default=4)
     ap.add_argument("--persistent_workers",          action="store_true", default=False)

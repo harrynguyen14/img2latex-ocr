@@ -16,8 +16,9 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
 
 
 def setup_distributed():
+    import datetime
     local_rank = int(os.environ["LOCAL_RANK"])
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=60))
     torch.cuda.set_device(local_rank)
     return dist.get_rank(), local_rank, dist.get_world_size()
 
