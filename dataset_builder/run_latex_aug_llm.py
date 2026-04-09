@@ -301,6 +301,7 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int) -> 
             max_new_tokens = max_new_tokens,
             do_sample      = False,
             pad_token_id   = tokenizer.pad_token_id,
+            enable_thinking= False,  # Qwen3: disable CoT reasoning
         )
 
     input_len = inputs["input_ids"].shape[1]
@@ -319,7 +320,7 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int) -> 
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",      type=str, default="Qwen/Qwen2.5-Math-7B-Instruct")
+    ap.add_argument("--model",      type=str, default="Qwen/Qwen3-8B")
     ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR / "train" / "raw"))
     ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
@@ -348,7 +349,7 @@ def main():
     log.addHandler(fh)
 
     log.info("=" * 60)
-    log.info("  LaTeX Augmentation  |  Qwen2.5-Math-7B  |  2x T4 15GB")
+    log.info("  LaTeX Augmentation  |  Qwen3-8B  |  2x T4 15GB")
     log.info("=" * 60)
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
