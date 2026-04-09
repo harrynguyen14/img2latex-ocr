@@ -192,10 +192,6 @@ def clean_output(raw: str) -> str:
     out = re.sub(r"^\$\$?(.+?)\$\$?$",                                 r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\\[(.+?)\\\]$",                                    r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$", r"\1", out, flags=re.DOTALL)
-    # Lấy dòng đầu tiên nếu model output nhiều dòng giải thích
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    if lines:
-        out = lines[0]
     return out.strip()
 
 
@@ -226,20 +222,8 @@ def build_bnb_config() -> BitsAndBytesConfig:
     )
 
 
-def build_max_memory() -> dict:
-    n_gpu = torch.cuda.device_count()
-    mem   = {}
-    for i in range(n_gpu):
-        total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-        mem[i]   = f"{max(1, int(total_gb) - 2)}GiB"
-    mem["cpu"] = "24GiB"
-    return mem
-
-
 def load_model(model_name: str):
     log.info(f"Loading {model_name}  |  4-bit NF4 + double-quant")
-    max_mem = build_max_memory()
-    log.info(f"  max_memory: {max_mem}")
 
     from transformers.utils import logging as hf_logging
     hf_logging.disable_progress_bar()
@@ -250,10 +234,27 @@ def load_model(model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    n_gpu = torch.cuda.device_count()
+    if n_gpu >= 2:
+        total_0 = torch.cuda.get_device_properties(0).total_memory / 1e9
+        total_1 = torch.cuda.get_device_properties(1).total_memory / 1e9
+        max_mem = {
+            0: f"{max(1, int(total_0) - 3)}GiB",
+            1: f"{max(1, int(total_1) - 1)}GiB",
+            "cpu": "24GiB",
+        }
+        dmap = "auto"
+    else:
+        total_0 = torch.cuda.get_device_properties(0).total_memory / 1e9
+        max_mem = {0: f"{max(1, int(total_0) - 2)}GiB", "cpu": "24GiB"}
+        dmap = "auto"
+
+    log.info(f"  device_map={dmap}  max_memory={max_mem}")
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config = build_bnb_config(),
-        device_map          = "balanced",
+        device_map          = dmap,
         max_memory          = max_mem,
     )
     model.eval()
