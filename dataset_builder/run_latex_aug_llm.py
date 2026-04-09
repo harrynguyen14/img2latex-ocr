@@ -215,13 +215,24 @@ def load_model(model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype  = torch.float16,
-        device_map   = "auto",
-    )
+    n_gpu = torch.cuda.device_count()
+    if n_gpu > 1:
+        # Replicate full model on GPU 0, wrap with DataParallel for balanced load.
+        # Pipeline (device_map=auto) leaves GPU 0 idle while GPU 1 runs — avoid it.
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype      = torch.float16,
+            device_map = "cuda:0",
+        )
+        model = torch.nn.DataParallel(model)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype      = torch.float16,
+            device_map = "auto",
+        )
     model.eval()
-    log.info("Model ready ✓")
+    log.info(f"Model ready ✓  ({n_gpu} GPU(s){'  DataParallel' if n_gpu > 1 else ''})")
     log_gpu_memory()
     return model, tokenizer
 
@@ -235,7 +246,8 @@ def build_messages(latex: str, transform: str) -> list[dict]:
 
 
 def get_first_device(model) -> torch.device:
-    return next(model.parameters()).device
+    m = model.module if isinstance(model, torch.nn.DataParallel) else model
+    return next(m.parameters()).device
 
 
 def build_prompt(messages: list[dict], tokenizer) -> str:
@@ -264,8 +276,9 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
                  else tokenize_batch(tokenizer, batch)
     inputs = {k: v.to(first_device) for k, v in cpu_inputs.items()}
 
+    gen_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     with torch.no_grad():
-        output_ids = model.generate(
+        output_ids = gen_model.generate(
             input_ids          = inputs["input_ids"],
             attention_mask     = inputs["attention_mask"],
             max_new_tokens     = max_new_tokens,
@@ -375,7 +388,7 @@ def main():
     executor   = ThreadPoolExecutor(max_workers=1)
     chunk: list[dict] = []
 
-    pbar = tqdm(desc="Augmenting", ncols=90, unit="batch")
+    pbar = tqdm(desc="Augmenting", ncols=90, unit="sample", total=args.n_samples)
 
     def flush_chunk(chunk):
         nonlocal batch_no
@@ -391,7 +404,7 @@ def main():
                 executor, prefetch_fut, next_b,
             )
             batch_no += 1
-            pbar.update(1)
+            pbar.update(len(batch))
             pbar.set_postfix(ok=stats["success"], fail=stats["failed"], seen=total_seen)
 
             if batch_no % args.ckpt_every == 0:
