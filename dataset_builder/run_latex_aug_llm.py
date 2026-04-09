@@ -30,6 +30,7 @@ import random
 import re
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pyarrow as pa
@@ -49,11 +50,16 @@ SEED        = 42
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
-    level   = logging.INFO,
+    level   = logging.DEBUG,
     format  = "%(asctime)s | %(levelname)-8s | %(message)s",
     handlers= [logging.StreamHandler()],
 )
 log = logging.getLogger("latex_aug")
+
+# Tắt verbose logs từ các thư viện bên ngoài
+for _noisy in ("httpx", "httpcore", "huggingface_hub", "huggingface_hub.file_download",
+               "filelock", "transformers", "accelerate"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -185,20 +191,22 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
 
 def clean_output(raw: str) -> str:
     out = raw.strip()
-    out = re.sub(r"^```.*?\n", "", out, flags=re.DOTALL)
-    out = re.sub(r"```$",      "", out)
-    out = re.sub(r"^\$\$?(.*?)\$\$?$",                                  r"\1", out, flags=re.DOTALL)
-    out = re.sub(r"^\\\[(.*?)\\\]$",                                     r"\1", out, flags=re.DOTALL)
-    out = re.sub(r"^\\begin\{equation\*?\}(.*?)\\end\{equation\*?\}$",   r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^```[^\n]*\n", "", out)        # strip opening ```lang
+    out = re.sub(r"\n?```$",       "", out)        # strip closing ```
+    out = re.sub(r"^\$\$?(.+?)\$\$?$",                                  r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^\\\[(.+?)\\\]$",                                     r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$",   r"\1", out, flags=re.DOTALL)
     return out.strip()
 
 
 def is_valid_output(original: str, output: str) -> bool:
-    if not output or len(output.strip()) < 2:
+    if not isinstance(output, str) or not output or len(output.strip()) < 2:
         return False
     if output.strip() == original.strip():
         return False
-    if len(output) > len(original) * 5:
+    # p99 input = 303 chars; expand tối đa ~3x → output hợp lệ < ~900 chars
+    # Dùng max(len*4, 512) để không reject input ngắn bị expand nhiều
+    if len(output) > max(len(original) * 4, 512):
         return False
     return True
 
@@ -218,20 +226,20 @@ def build_bnb_config() -> BitsAndBytesConfig:
     return BitsAndBytesConfig(
         load_in_4bit              = True,
         bnb_4bit_quant_type       = "nf4",
-        bnb_4bit_compute_dtype    = torch.float16,
+        bnb_4bit_compute_dtype    = torch.float16,  # T4 không có bfloat16 native
         bnb_4bit_use_double_quant = True,
         bnb_4bit_quant_storage    = torch.uint8,
     )
 
 
 def build_max_memory() -> dict:
-    """Cân bằng tải đều 2x T4 — dành 1GB buffer cho CUDA overhead."""
+    """Cân bằng tải đều 2x T4 — dành 1.5GB buffer cho CUDA overhead + KV cache."""
     n_gpu = torch.cuda.device_count()
     mem   = {}
     for i in range(n_gpu):
         total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-        mem[i]   = f"{int(total_gb) - 1}GiB"
-    mem["cpu"] = "24GiB"   # spill sang CPU RAM nếu cần
+        mem[i]   = f"{max(1, int(total_gb) - 2)}GiB"  # buffer rộng hơn để tránh OOM
+    mem["cpu"] = "24GiB"
     return mem
 
 
@@ -240,18 +248,22 @@ def load_model(model_name: str):
     max_mem = build_max_memory()
     log.info(f"  max_memory: {max_mem}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    from transformers.utils import logging as hf_logging
+    hf_logging.disable_progress_bar()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, padding_side="left",
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config = build_bnb_config(),
-        device_map          = "auto",
+        device_map          = "balanced",  # chia đều layers giữa 2 GPU thay vì "auto" fill GPU0 trước
         max_memory          = max_mem,
     )
     model.eval()
-
     log.info("Model ready ✓")
     log_gpu_memory()
     return model, tokenizer
@@ -262,9 +274,10 @@ def load_model(model_name: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_messages(latex: str, transform: str) -> list[dict]:
+    # Qwen3: system prompt không được dùng khi enable_thinking=False qua chat_template
+    # → ghép system vào user message để tránh conflict
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user",   "content": _USER_TEMPLATE.format(transform=transform, latex=latex)},
+        {"role": "user", "content": _SYSTEM_PROMPT + "\n\n" + _USER_TEMPLATE.format(transform=transform, latex=latex)},
     ]
 
 
@@ -273,26 +286,33 @@ def get_first_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
-def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int) -> list[str]:
+def tokenize_batch(tokenizer, batch: list[dict]) -> dict:
+    """Tokenize batch trên CPU — an toàn chạy trên background thread (không .to(device))."""
     texts = [
         tokenizer.apply_chat_template(
             item["messages"],
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=False,
         )
         for item in batch
     ]
-
-    inputs = tokenizer(
+    return tokenizer(
         texts,
         return_tensors = "pt",
         padding        = True,
         truncation     = True,
         max_length     = 512,
     )
-    # Đưa input lên GPU đầu tiên — accelerate/device_map tự route các layer sau
+
+
+def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
+                   prefetched_inputs: dict | None = None) -> list[str]:
     first_device = get_first_device(model)
-    inputs = {k: v.to(first_device) for k, v in inputs.items()}
+    # .to(device) luôn chạy trên main thread để đảm bảo thread-safety với CUDA
+    cpu_inputs = prefetched_inputs if prefetched_inputs is not None \
+                 else tokenize_batch(tokenizer, batch)
+    inputs = {k: v.to(first_device) for k, v in cpu_inputs.items()}
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -300,8 +320,9 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int) -> 
             attention_mask = inputs["attention_mask"],
             max_new_tokens = max_new_tokens,
             do_sample      = False,
+            use_cache      = True,
             pad_token_id   = tokenizer.pad_token_id,
-            enable_thinking= False,  # Qwen3: disable CoT reasoning
+            eos_token_id   = tokenizer.eos_token_id,  # early stop khi model xong
         )
 
     input_len = inputs["input_ids"].shape[1]
@@ -324,8 +345,8 @@ def parse_args():
     ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR))
     ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
-    ap.add_argument("--batch_size",     type=int,   default=8)
-    ap.add_argument("--max_new_tokens", type=int,   default=128)
+    ap.add_argument("--batch_size",     type=int,   default=16)   # 2x T4: 16-32 tuỳ model size
+    ap.add_argument("--max_new_tokens", type=int,   default=128)  # p99 input=35tok → output expand ~3x=105tok; +buffer=128
     ap.add_argument("--shard_size",     type=int,   default=5_000)
     ap.add_argument("--ckpt_every",     type=int,   default=50,
                     help="Save checkpoint mỗi N batch")
@@ -360,9 +381,8 @@ def main():
     records = load_latex_corpus(Path(args.raw_dir), args.n_samples, args.seed)
     log.info(f"  loaded: {len(records):,}")
 
-    # 2. Assign transform + stable idx dựa trên seed
-    for i, r in enumerate(records):
-        r["idx"]       = i
+    # 2. Assign transform — dùng idx gốc từ dataset (không overwrite) để checkpoint resume hoạt động đúng
+    for r in records:
         r["transform"] = rng.choice(_TRANSFORMS)
         r["messages"]  = build_messages(r["latex"], r["transform"])
 
@@ -374,34 +394,63 @@ def main():
         log.info("All samples already processed. Nothing to do.")
         return
 
+    # Sort by latex length để giảm padding waste trong mỗi batch
+    pending.sort(key=lambda r: len(r["latex"]))
+    log.info("Samples sorted by latex length to minimize padding ✓")
+
     # 3. Load model
     model, tokenizer = load_model(args.model)
 
-    # 4. Batch inference
+    # 4. Batch inference với prefetch tokenization
     stats = {"success": 0, "failed": 0}
     bs    = args.batch_size
 
-    pbar = tqdm(range(0, len(pending), bs), desc="Augmenting", ncols=90)
-    for batch_no, start in enumerate(pbar):
-        batch = pending[start : start + bs]
+    def _tokenize(batch):
+        return tokenize_batch(tokenizer, batch)
+
+    batches   = [pending[s : s + bs] for s in range(0, len(pending), bs)]
+    n_batches = len(batches)
+
+    # Prefetch batch đầu tiên
+    executor      = ThreadPoolExecutor(max_workers=1)
+    prefetch_fut  = executor.submit(_tokenize, batches[0]) if batches else None
+
+    pbar = tqdm(range(n_batches), desc="Augmenting", ncols=90)
+    for batch_no in pbar:
+        batch = batches[batch_no]
+
+        # Lấy tokenized inputs từ prefetch
+        prefetched = prefetch_fut.result() if prefetch_fut is not None else None
+
+        # Prefetch batch tiếp theo ngay lúc GPU đang chạy inference
+        if batch_no + 1 < n_batches:
+            prefetch_fut = executor.submit(_tokenize, batches[batch_no + 1])
+        else:
+            prefetch_fut = None
 
         # Retry loop per batch
         outputs = None
         for attempt in range(1, args.max_retries + 1):
             try:
-                outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens)
+                outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens,
+                                         prefetched_inputs=prefetched)
+                prefetched = None  # đã dùng, tránh double-use khi retry
                 break
             except torch.cuda.OutOfMemoryError:
-                log.warning(f"OOM batch {batch_no} attempt {attempt} — clearing cache")
+                log.warning(f"OOM batch {batch_no} attempt {attempt}/{args.max_retries} — clearing cache")
                 gc.collect()
                 torch.cuda.empty_cache()
-                time.sleep(args.retry_delay)
+                prefetched = None
+                if attempt < args.max_retries:
+                    time.sleep(args.retry_delay)
             except Exception as e:
-                log.warning(f"Batch {batch_no} attempt {attempt}/{args.max_retries}: {e}")
+                log.warning(f"Batch {batch_no} attempt {attempt}/{args.max_retries}: {type(e).__name__}: {e}")
+                prefetched = None
                 if attempt < args.max_retries:
                     time.sleep(args.retry_delay * attempt)
 
         if outputs is None:
+            log.error(f"All {args.max_retries} retries failed for batch {batch_no}, skipping.")
             outputs = [""] * len(batch)
 
         # Record results
@@ -417,7 +466,11 @@ def main():
                 ckpt.mark_done(idx)
                 stats["success"] += 1
             else:
-                ckpt.mark_failed(idx, "invalid_output")
+                reason = "empty" if not out or len(out.strip()) < 2 else \
+                         "unchanged" if out.strip() == r["latex"].strip() else "too_long"
+                if batch_no < 3:  # debug: log vài batch đầu
+                    log.debug(f"  FAIL [{reason}] orig={r['latex'][:60]!r} → out={out[:60]!r}")
+                ckpt.mark_failed(idx, reason)
                 stats["failed"] += 1
 
         pbar.set_postfix(ok=stats["success"], fail=stats["failed"])
@@ -434,6 +487,7 @@ def main():
 
     # Save checkpoint lần cuối
     ckpt.save()
+    executor.shutdown(wait=False)
 
     # 5. Finalize shards
     final_paths = writer.finalize()
