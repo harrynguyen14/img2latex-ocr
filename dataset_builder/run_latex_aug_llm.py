@@ -192,6 +192,10 @@ def clean_output(raw: str) -> str:
     out = re.sub(r"^\$\$?(.+?)\$\$?$",                                 r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\\[(.+?)\\\]$",                                    r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$", r"\1", out, flags=re.DOTALL)
+    # Lấy dòng đầu tiên nếu model output nhiều dòng giải thích
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if lines:
+        out = lines[0]
     return out.strip()
 
 
