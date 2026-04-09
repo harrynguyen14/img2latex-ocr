@@ -17,9 +17,11 @@ Features:
   - ShardWriter — flush ra disk định kỳ, không OOM RAM
   - Batch inference với attention_mask đúng
 
-Chạy:
+Chạy (1 process, device_map tự trải model qua 2 GPU):
     python run_latex_aug_llm.py
-    python run_latex_aug_llm.py --model Qwen/Qwen2.5-Math-7B-Instruct --n_samples 50000
+    python run_latex_aug_llm.py --raw_dir /path/to/raw --n_samples 50000
+
+KHÔNG dùng torchrun — torchrun spawn 2 process riêng, mỗi process load full model → OOM.
 """
 
 import argparse
@@ -183,7 +185,7 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
         ):
-            if lat and len(lat.strip()) >= 10:  # bỏ latex quá ngắn (< 10 chars) — không đủ để transform
+            if lat and len(lat.strip()) >= 5:   # bỏ latex quá ngắn (< 5 chars) — không đủ để transform
                 records.append({"idx": idx, "image": img, "latex": lat, "source": src})
     rng.shuffle(records)
     return records[:n_samples]
