@@ -163,7 +163,6 @@ class ShardWriter:
         pq.write_table(
             pa.table({
                 "idx":    pa.array([r["idx"]    for r in self.buffer], type=pa.int64()),
-                "image":  pa.array([r["image"]  for r in self.buffer], type=pa.binary()),
                 "latex":  pa.array([r["latex"]  for r in self.buffer], type=pa.string()),
                 "source": pa.array([r["source"] for r in self.buffer], type=pa.string()),
             }),
@@ -195,20 +194,33 @@ class ShardWriter:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
+    """
+    Reservoir sampling — O(n_samples) RAM, 1 pass duy nhất.
+    Chỉ load idx/latex/source — không load image (join theo idx khi cần).
+    """
     rng = random.Random(seed)
-    records = []
+    reservoir: list[dict] = []
+    total_seen = 0
     for pfile in sorted(raw_dir.glob("*.parquet")):
-        tbl = pq.read_table(str(pfile), columns=["idx", "image", "latex", "source"])
-        for idx, img, lat, src in zip(
+        tbl = pq.read_table(str(pfile), columns=["idx", "latex", "source"])
+        for idx, lat, src in zip(
             tbl["idx"].to_pylist(),
-            tbl["image"].to_pylist(),
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
         ):
-            if lat and len(lat.strip()) >= 15:  # bỏ latex quá ngắn — < 15 chars thường không transform được
-                records.append({"idx": idx, "image": img, "latex": lat, "source": src})
-    rng.shuffle(records)
-    return records[:n_samples]
+            if not lat or len(lat.strip()) < 15:
+                continue
+            total_seen += 1
+            item = {"idx": idx, "latex": lat, "source": src}
+            if len(reservoir) < n_samples:
+                reservoir.append(item)
+            else:
+                j = rng.randint(0, total_seen - 1)
+                if j < n_samples:
+                    reservoir[j] = item
+
+    rng.shuffle(reservoir)
+    return reservoir
 
 
 def clean_output(raw: str) -> str:
@@ -490,7 +502,6 @@ def main():
             if is_valid_output(r["latex"], out):
                 writer.write({
                     "idx":    r["idx"],
-                    "image":  r["image"],
                     "latex":  out,
                     "source": r["source"],
                 })
