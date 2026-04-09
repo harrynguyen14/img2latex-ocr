@@ -42,8 +42,8 @@ warnings.filterwarnings("ignore")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-DATASET_DIR = Path("D:/dataset-ocr-builder/latex-ocr-dataset")
-OUT_DIR     = DATASET_DIR / "train" / "heavy_text"
+DATASET_DIR = Path("/kaggle/input/latex-ocr-raw")
+OUT_DIR     = Path("/kaggle/working/heavy_text")
 SEED        = 42
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -321,7 +321,7 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int) -> 
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model",      type=str, default="Qwen/Qwen3-8B")
-    ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR / "train" / "raw"))
+    ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR))
     ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
     ap.add_argument("--batch_size",     type=int,   default=8)
