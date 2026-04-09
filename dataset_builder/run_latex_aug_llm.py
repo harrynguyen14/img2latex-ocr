@@ -185,7 +185,7 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
         ):
-            if lat and len(lat.strip()) >= 5:   # bỏ latex quá ngắn (< 5 chars) — không đủ để transform
+            if lat and len(lat.strip()) >= 15:  # bỏ latex quá ngắn — < 15 chars thường không transform được
                 records.append({"idx": idx, "image": img, "latex": lat, "source": src})
     rng.shuffle(records)
     return records[:n_samples]
@@ -347,7 +347,7 @@ def parse_args():
     ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR))
     ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
-    ap.add_argument("--batch_size",     type=int,   default=16)   # 2x T4: 16-32 tuỳ model size
+    ap.add_argument("--batch_size",     type=int,   default=32)   # 2x T4: VRAM còn trống nhiều, tăng lên 32
     ap.add_argument("--max_new_tokens", type=int,   default=128)  # p99 input=35tok → output expand ~3x=105tok; +buffer=128
     ap.add_argument("--shard_size",     type=int,   default=5_000)
     ap.add_argument("--ckpt_every",     type=int,   default=50,
