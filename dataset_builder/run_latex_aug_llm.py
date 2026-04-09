@@ -296,7 +296,7 @@ def load_model(model_name: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_messages(latex: str, transform: str) -> list[dict]:
-    user_content = _TRANSFORM_TEMPLATES[transform].format(latex=latex)
+    user_content = _TRANSFORM_TEMPLATES[transform].replace("{latex}", latex)
     return [
         {"role": "user", "content": _SYSTEM_PROMPT + "\n\n" + user_content},
     ]
