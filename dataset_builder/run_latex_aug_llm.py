@@ -183,7 +183,7 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
         ):
-            if lat and lat.strip():
+            if lat and len(lat.strip()) >= 10:  # bỏ latex quá ngắn (< 10 chars) — không đủ để transform
                 records.append({"idx": idx, "image": img, "latex": lat, "source": src})
     rng.shuffle(records)
     return records[:n_samples]
@@ -468,7 +468,7 @@ def main():
             else:
                 reason = "empty" if not out or len(out.strip()) < 2 else \
                          "unchanged" if out.strip() == r["latex"].strip() else "too_long"
-                if batch_no < 3:  # debug: log vài batch đầu
+                if batch_no == 0:  # debug: chỉ log batch đầu tiên
                     log.debug(f"  FAIL [{reason}] orig={r['latex'][:60]!r} → out={out[:60]!r}")
                 ckpt.mark_failed(idx, reason)
                 stats["failed"] += 1
