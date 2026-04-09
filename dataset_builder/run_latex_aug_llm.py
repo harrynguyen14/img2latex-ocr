@@ -1,29 +1,3 @@
-"""
-run_latex_aug_llm.py
---------------------
-Group 3: Logic-based LaTeX augmentation dùng Qwen2.5-Math-7B-Instruct (4-bit NF4).
-
-Các phép biến đổi:
-  - expand:   (a+b)^2 ↔ a^2 + 2ab + b^2
-  - factor:   a^2-b^2 → (a+b)(a-b)
-  - commute:  a + b → b + a
-  - neutral:  thêm +x-x, nhân \\frac{y}{y}
-  - constant: \\pi ↔ 3.14159..., e ↔ 2.71828...
-
-Features:
-  - 4-bit NF4 + double-quant (BitsAndBytes) — fit 2x T4 15GB
-  - max_memory cân bằng tải đều 2 GPU
-  - Checkpoint/resume crash-safe (save mỗi N batch)
-  - ShardWriter — flush ra disk định kỳ, không OOM RAM
-  - Batch inference với attention_mask đúng
-
-Chạy (1 process, device_map tự trải model qua 2 GPU):
-    python run_latex_aug_llm.py
-    python run_latex_aug_llm.py --raw_dir /path/to/raw --n_samples 50000
-
-KHÔNG dùng torchrun — torchrun spawn 2 process riêng, mỗi process load full model → OOM.
-"""
-
 import argparse
 import gc
 import json
@@ -43,13 +17,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 warnings.filterwarnings("ignore")
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
-
 DATASET_DIR = Path("/kaggle/input/latex-ocr-raw")
 OUT_DIR     = Path("/kaggle/working/heavy_text")
 SEED        = 42
-
-# ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level   = logging.DEBUG,
@@ -58,21 +28,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("latex_aug")
 
-# Tắt verbose logs từ các thư viện bên ngoài
 for _noisy in ("httpx", "httpcore", "huggingface_hub", "huggingface_hub.file_download",
                "filelock", "transformers", "accelerate"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
-
 _SYSTEM_PROMPT = (
     "You are a LaTeX rewriting assistant. "
     "You will receive a LaTeX math expression and a rewrite instruction. "
-    "You MUST rewrite the expression — never return it unchanged. "
+    "You MUST output a DIFFERENT expression — never return it unchanged. "
+    "Examples of valid rewrites: a+b → b+a, \\frac{1}{2} → \\frac{2}{4}, x^2 → x\\cdot x. "
     "Output ONLY the rewritten LaTeX, no explanation, no markdown, no $...$ wrapper."
 )
 
-# Template riêng cho từng transform — cụ thể hơn để tránh unchanged
 _TRANSFORM_TEMPLATES = {
     "commute": (
         "Reorder the terms or factors in this expression (e.g. a+b → b+a, xy → yx). "
@@ -101,10 +68,16 @@ _TRANSFORM_TEMPLATES = {
 
 _TRANSFORMS = list(_TRANSFORM_TEMPLATES.keys())
 
+_AUGMENTABLE_RE = re.compile(
+    r'\\frac|\\sum|\\int|\\prod|\\sqrt|\\cdot|\^|_|\+|-|='
+)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Checkpoint
-# ══════════════════════════════════════════════════════════════════════════════
+
+def is_augmentable(latex: str) -> bool:
+    if len(latex.strip()) < 15:
+        return False
+    return bool(_AUGMENTABLE_RE.search(latex))
+
 
 class Checkpoint:
     def __init__(self, path: Path):
@@ -137,10 +110,6 @@ class Checkpoint:
     def is_done(self, idx: str) -> bool:
         return idx in self.done
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ShardWriter
-# ══════════════════════════════════════════════════════════════════════════════
 
 class ShardWriter:
     def __init__(self, out_dir: Path, shard_size: int = 5_000):
@@ -189,15 +158,7 @@ class ShardWriter:
         return final_paths
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
 def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
-    """
-    Reservoir sampling — O(n_samples) RAM, 1 pass duy nhất.
-    Chỉ load idx/latex/source — không load image (join theo idx khi cần).
-    """
     rng = random.Random(seed)
     reservoir: list[dict] = []
     total_seen = 0
@@ -208,7 +169,7 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
         ):
-            if not lat or len(lat.strip()) < 15:
+            if not lat or not is_augmentable(lat):
                 continue
             total_seen += 1
             item = {"idx": idx, "latex": lat, "source": src}
@@ -225,11 +186,12 @@ def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
 
 def clean_output(raw: str) -> str:
     out = raw.strip()
-    out = re.sub(r"^```[^\n]*\n", "", out)        # strip opening ```lang
-    out = re.sub(r"\n?```$",       "", out)        # strip closing ```
-    out = re.sub(r"^\$\$?(.+?)\$\$?$",                                  r"\1", out, flags=re.DOTALL)
-    out = re.sub(r"^\\\[(.+?)\\\]$",                                     r"\1", out, flags=re.DOTALL)
-    out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$",   r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL).strip()
+    out = re.sub(r"^```[^\n]*\n", "", out)
+    out = re.sub(r"\n?```$", "", out)
+    out = re.sub(r"^\$\$?(.+?)\$\$?$",                                 r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^\\\[(.+?)\\\]$",                                    r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$", r"\1", out, flags=re.DOTALL)
     return out.strip()
 
 
@@ -238,8 +200,6 @@ def is_valid_output(original: str, output: str) -> bool:
         return False
     if output.strip() == original.strip():
         return False
-    # p99 input = 303 chars; expand tối đa ~3x → output hợp lệ < ~900 chars
-    # Dùng max(len*4, 512) để không reject input ngắn bị expand nhiều
     if len(output) > max(len(original) * 4, 512):
         return False
     return True
@@ -252,27 +212,22 @@ def log_gpu_memory():
         log.info(f"  GPU {i}: {used:.2f} / {total:.2f} GB")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Model loading — tối ưu 2x T4 15GB
-# ══════════════════════════════════════════════════════════════════════════════
-
 def build_bnb_config() -> BitsAndBytesConfig:
     return BitsAndBytesConfig(
         load_in_4bit              = True,
         bnb_4bit_quant_type       = "nf4",
-        bnb_4bit_compute_dtype    = torch.float16,  # T4 không có bfloat16 native
+        bnb_4bit_compute_dtype    = torch.float16,
         bnb_4bit_use_double_quant = True,
         bnb_4bit_quant_storage    = torch.uint8,
     )
 
 
 def build_max_memory() -> dict:
-    """Cân bằng tải đều 2x T4 — dành 1.5GB buffer cho CUDA overhead + KV cache."""
     n_gpu = torch.cuda.device_count()
     mem   = {}
     for i in range(n_gpu):
         total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-        mem[i]   = f"{max(1, int(total_gb) - 2)}GiB"  # buffer rộng hơn để tránh OOM
+        mem[i]   = f"{max(1, int(total_gb) - 2)}GiB"
     mem["cpu"] = "24GiB"
     return mem
 
@@ -294,7 +249,7 @@ def load_model(model_name: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config = build_bnb_config(),
-        device_map          = "auto",  # để accelerate tự quyết — balanced không hiệu quả với BnB quantized model
+        device_map          = "balanced",
         max_memory          = max_mem,
     )
     model.eval()
@@ -303,36 +258,29 @@ def load_model(model_name: str):
     return model, tokenizer
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Inference
-# ══════════════════════════════════════════════════════════════════════════════
-
 def build_messages(latex: str, transform: str) -> list[dict]:
     user_content = _TRANSFORM_TEMPLATES[transform].replace("{latex}", latex)
     return [
-        {"role": "user", "content": _SYSTEM_PROMPT + "\n\n" + user_content},
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user",   "content": user_content},
     ]
 
 
 def get_first_device(model) -> torch.device:
-    """Lấy device của embedding layer — dùng để đưa inputs lên đúng GPU đầu tiên."""
     return next(model.parameters()).device
 
 
-def build_prompt(messages: list[dict]) -> str:
-    """Build Qwen3 chat prompt thủ công — nhanh hơn Jinja2 apply_chat_template ~10x."""
-    # Format: <|im_start|>role\ncontent<|im_end|>\n
-    # Với enable_thinking=False: assistant prefix là <|im_start|>assistant\n<think>\n\n</think>\n
-    text = ""
-    for msg in messages:
-        text += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
-    text += "<|im_start|>assistant\n<think>\n\n</think>\n"
-    return text
+def build_prompt(messages: list[dict], tokenizer) -> str:
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
 
 
 def tokenize_batch(tokenizer, batch: list[dict]) -> dict:
-    """Tokenize batch trên CPU — an toàn chạy trên background thread (không .to(device))."""
-    texts = [build_prompt(item["messages"]) for item in batch]
+    texts = [build_prompt(item["messages"], tokenizer) for item in batch]
     return tokenizer(
         texts,
         return_tensors = "pt",
@@ -345,22 +293,24 @@ def tokenize_batch(tokenizer, batch: list[dict]) -> dict:
 def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
                    prefetched_inputs: dict | None = None) -> list[str]:
     first_device = get_first_device(model)
-    # .to(device) luôn chạy trên main thread để đảm bảo thread-safety với CUDA
     cpu_inputs = prefetched_inputs if prefetched_inputs is not None \
                  else tokenize_batch(tokenizer, batch)
     inputs = {k: v.to(first_device) for k, v in cpu_inputs.items()}
 
     with torch.no_grad():
         output_ids = model.generate(
-            input_ids      = inputs["input_ids"],
-            attention_mask = inputs["attention_mask"],
-            max_new_tokens = max_new_tokens,
-            do_sample      = True,
-            temperature    = 0.3,   # đủ để thử transform, không quá random làm hỏng LaTeX
-            top_p          = 0.9,
-            use_cache      = True,
-            pad_token_id   = tokenizer.pad_token_id,
-            eos_token_id   = tokenizer.eos_token_id,
+            input_ids          = inputs["input_ids"],
+            attention_mask     = inputs["attention_mask"],
+            max_new_tokens     = max_new_tokens,
+            do_sample          = True,
+            temperature        = 0.7,
+            top_p              = 0.8,
+            top_k              = 20,
+            min_p              = 0.0,
+            repetition_penalty = 1.5,
+            use_cache          = True,
+            pad_token_id       = tokenizer.pad_token_id,
+            eos_token_id       = tokenizer.eos_token_id,
         )
 
     input_len = inputs["input_ids"].shape[1]
@@ -371,33 +321,20 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
     return results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════════
-
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",      type=str, default="Qwen/Qwen3-8B")
-    ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR))
-    ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
+    ap.add_argument("--model",          type=str,   default="Qwen/Qwen3-8B")
+    ap.add_argument("--raw_dir",        type=str,   default=str(DATASET_DIR))
+    ap.add_argument("--out_dir",        type=str,   default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
-    ap.add_argument("--batch_size",     type=int,   default=64)   # GPU dùng ~6.5/15GB → còn ~8GB, tăng batch để tận dụng
-    ap.add_argument("--max_new_tokens", type=int,   default=96)   # thực tế transform output < 96 tok; eos_token_id sẽ stop sớm hơn
+    ap.add_argument("--batch_size",     type=int,   default=96)
+    ap.add_argument("--max_new_tokens", type=int,   default=128)
     ap.add_argument("--shard_size",     type=int,   default=5_000)
-    ap.add_argument("--ckpt_every",     type=int,   default=50,
-                    help="Save checkpoint mỗi N batch")
-    ap.add_argument("--gc_every",       type=int,   default=200,
-                    help="gc.collect() mỗi N batch")
+    ap.add_argument("--ckpt_every",     type=int,   default=50)
+    ap.add_argument("--gc_every",       type=int,   default=200)
     ap.add_argument("--max_retries",    type=int,   default=3)
     ap.add_argument("--retry_delay",    type=float, default=2.0)
     ap.add_argument("--seed",           type=int,   default=SEED)
-    # Multi-GPU: chạy 2 process độc lập, mỗi process 1 GPU xử lý nửa dataset
-    ap.add_argument("--gpu_id",   type=int, default=None,
-                    help="GPU index để dùng (0 hoặc 1). None = dùng tất cả GPU (device_map=auto)")
-    ap.add_argument("--worker_id",   type=int, default=0,
-                    help="Worker index (0 hoặc 1) — quyết định nửa dataset nào sẽ xử lý")
-    ap.add_argument("--num_workers", type=int, default=1,
-                    help="Tổng số workers đang chạy song song")
     return ap.parse_args()
 
 
@@ -407,7 +344,6 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # File log
     fh = logging.FileHandler(out_dir / "llm_aug.log", encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
     log.addHandler(fh)
@@ -419,12 +355,10 @@ def main():
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
 
-    # 1. Load corpus
     log.info(f"Loading up to {args.n_samples:,} samples from {args.raw_dir}...")
     records = load_latex_corpus(Path(args.raw_dir), args.n_samples, args.seed)
     log.info(f"  loaded: {len(records):,}")
 
-    # 2. Assign transform — dùng idx gốc từ dataset (không overwrite) để checkpoint resume hoạt động đúng
     for r in records:
         r["transform"] = rng.choice(_TRANSFORMS)
         r["messages"]  = build_messages(r["latex"], r["transform"])
@@ -437,14 +371,11 @@ def main():
         log.info("All samples already processed. Nothing to do.")
         return
 
-    # Sort by latex length để giảm padding waste trong mỗi batch
     pending.sort(key=lambda r: len(r["latex"]))
     log.info("Samples sorted by latex length to minimize padding ✓")
 
-    # 3. Load model
     model, tokenizer = load_model(args.model)
 
-    # 4. Batch inference với prefetch tokenization
     stats = {"success": 0, "failed": 0}
     bs    = args.batch_size
 
@@ -454,30 +385,26 @@ def main():
     batches   = [pending[s : s + bs] for s in range(0, len(pending), bs)]
     n_batches = len(batches)
 
-    # Prefetch batch đầu tiên
-    executor      = ThreadPoolExecutor(max_workers=1)
-    prefetch_fut  = executor.submit(_tokenize, batches[0]) if batches else None
+    executor     = ThreadPoolExecutor(max_workers=1)
+    prefetch_fut = executor.submit(_tokenize, batches[0]) if batches else None
 
     pbar = tqdm(range(n_batches), desc="Augmenting", ncols=90)
     for batch_no in pbar:
         batch = batches[batch_no]
 
-        # Lấy tokenized inputs từ prefetch
         prefetched = prefetch_fut.result() if prefetch_fut is not None else None
 
-        # Prefetch batch tiếp theo ngay lúc GPU đang chạy inference
         if batch_no + 1 < n_batches:
             prefetch_fut = executor.submit(_tokenize, batches[batch_no + 1])
         else:
             prefetch_fut = None
 
-        # Retry loop per batch
         outputs = None
         for attempt in range(1, args.max_retries + 1):
             try:
                 outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens,
                                          prefetched_inputs=prefetched)
-                prefetched = None  # đã dùng, tránh double-use khi retry
+                prefetched = None
                 break
             except torch.cuda.OutOfMemoryError:
                 log.warning(f"OOM batch {batch_no} attempt {attempt}/{args.max_retries} — clearing cache")
@@ -496,7 +423,6 @@ def main():
             log.error(f"All {args.max_retries} retries failed for batch {batch_no}, skipping.")
             outputs = [""] * len(batch)
 
-        # Record results
         for r, out in zip(batch, outputs):
             idx = str(r["idx"])
             if is_valid_output(r["latex"], out):
@@ -510,28 +436,24 @@ def main():
             else:
                 reason = "empty" if not out or len(out.strip()) < 2 else \
                          "unchanged" if out.strip() == r["latex"].strip() else "too_long"
-                if batch_no == 0:  # debug: chỉ log batch đầu tiên
+                if batch_no == 0:
                     log.debug(f"  FAIL [{reason}] orig={r['latex'][:60]!r} → out={out[:60]!r}")
                 ckpt.mark_failed(idx, reason)
                 stats["failed"] += 1
 
         pbar.set_postfix(ok=stats["success"], fail=stats["failed"])
 
-        # Checkpoint mỗi ckpt_every batch (không phải mỗi batch — giảm I/O)
         if (batch_no + 1) % args.ckpt_every == 0:
             ckpt.save()
 
-        # GC định kỳ
         if (batch_no + 1) % args.gc_every == 0:
             gc.collect()
             torch.cuda.empty_cache()
             log_gpu_memory()
 
-    # Save checkpoint lần cuối
     ckpt.save()
     executor.shutdown(wait=False)
 
-    # 5. Finalize shards
     final_paths = writer.finalize()
 
     del model, tokenizer
@@ -539,7 +461,6 @@ def main():
     torch.cuda.empty_cache()
     log.info("Model unloaded, VRAM freed ✓")
 
-    # 6. Stats
     log.info("─" * 45)
     log.info(f"Success : {stats['success']:,}")
     log.info(f"Failed  : {stats['failed']:,}")
