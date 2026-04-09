@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 warnings.filterwarnings("ignore")
 
@@ -158,40 +158,31 @@ class ShardWriter:
         return final_paths
 
 
-def load_latex_corpus(raw_dir: Path, n_samples: int, seed: int) -> list[dict]:
-    rng = random.Random(seed)
-    reservoir: list[dict] = []
-    total_seen = 0
+def iter_parquet_files(raw_dir: Path):
     for pfile in sorted(raw_dir.glob("*.parquet")):
         tbl = pq.read_table(str(pfile), columns=["idx", "latex", "source"])
-        for idx, lat, src in zip(
+        rows = list(zip(
             tbl["idx"].to_pylist(),
             tbl["latex"].to_pylist(),
             tbl["source"].to_pylist(),
-        ):
-            if not lat or not is_augmentable(lat):
-                continue
-            total_seen += 1
-            item = {"idx": idx, "latex": lat, "source": src}
-            if len(reservoir) < n_samples:
-                reservoir.append(item)
-            else:
-                j = rng.randint(0, total_seen - 1)
-                if j < n_samples:
-                    reservoir[j] = item
-
-    rng.shuffle(reservoir)
-    return reservoir
+        ))
+        del tbl
+        for idx, lat, src in rows:
+            if lat and is_augmentable(lat):
+                yield {"idx": idx, "latex": lat, "source": src}
+        gc.collect()
 
 
 def clean_output(raw: str) -> str:
     out = raw.strip()
-    out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL).strip()
     out = re.sub(r"^```[^\n]*\n", "", out)
     out = re.sub(r"\n?```$", "", out)
     out = re.sub(r"^\$\$?(.+?)\$\$?$",                                 r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\\[(.+?)\\\]$",                                    r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$", r"\1", out, flags=re.DOTALL)
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if lines:
+        out = lines[0]
     return out.strip()
 
 
@@ -212,18 +203,8 @@ def log_gpu_memory():
         log.info(f"  GPU {i}: {used:.2f} / {total:.2f} GB")
 
 
-def build_bnb_config() -> BitsAndBytesConfig:
-    return BitsAndBytesConfig(
-        load_in_4bit              = True,
-        bnb_4bit_quant_type       = "nf4",
-        bnb_4bit_compute_dtype    = torch.float16,
-        bnb_4bit_use_double_quant = True,
-        bnb_4bit_quant_storage    = torch.uint8,
-    )
-
-
 def load_model(model_name: str):
-    log.info(f"Loading {model_name}  |  4-bit NF4 + double-quant")
+    log.info(f"Loading {model_name}  |  fp16")
 
     from transformers.utils import logging as hf_logging
     hf_logging.disable_progress_bar()
@@ -234,28 +215,10 @@ def load_model(model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    n_gpu = torch.cuda.device_count()
-    if n_gpu >= 2:
-        total_0 = torch.cuda.get_device_properties(0).total_memory / 1e9
-        total_1 = torch.cuda.get_device_properties(1).total_memory / 1e9
-        max_mem = {
-            0: f"{max(1, int(total_0) - 3)}GiB",
-            1: f"{max(1, int(total_1) - 1)}GiB",
-            "cpu": "24GiB",
-        }
-        dmap = "auto"
-    else:
-        total_0 = torch.cuda.get_device_properties(0).total_memory / 1e9
-        max_mem = {0: f"{max(1, int(total_0) - 2)}GiB", "cpu": "24GiB"}
-        dmap = "auto"
-
-    log.info(f"  device_map={dmap}  max_memory={max_mem}")
-
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        quantization_config = build_bnb_config(),
-        device_map          = dmap,
-        max_memory          = max_mem,
+        torch_dtype  = torch.float16,
+        device_map   = "auto",
     )
     model.eval()
     log.info("Model ready ✓")
@@ -280,7 +243,6 @@ def build_prompt(messages: list[dict], tokenizer) -> str:
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=False,
     )
 
 
@@ -311,8 +273,7 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
             temperature        = 0.7,
             top_p              = 0.8,
             top_k              = 20,
-            min_p              = 0.0,
-            repetition_penalty = 1.5,
+            repetition_penalty = 1.1,
             use_cache          = True,
             pad_token_id       = tokenizer.pad_token_id,
             eos_token_id       = tokenizer.eos_token_id,
@@ -326,14 +287,61 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
     return results
 
 
+def process_batch(batch, model, tokenizer, args, ckpt, writer, stats,
+                  executor, prefetch_fut, next_batch):
+    prefetched = prefetch_fut.result() if prefetch_fut is not None else None
+
+    new_fut = executor.submit(tokenize_batch, tokenizer, next_batch) \
+              if next_batch is not None else None
+
+    outputs = None
+    for attempt in range(1, args.max_retries + 1):
+        try:
+            outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens,
+                                     prefetched_inputs=prefetched)
+            prefetched = None
+            break
+        except torch.cuda.OutOfMemoryError:
+            log.warning(f"OOM attempt {attempt}/{args.max_retries} — clearing cache")
+            gc.collect()
+            torch.cuda.empty_cache()
+            prefetched = None
+            if attempt < args.max_retries:
+                time.sleep(args.retry_delay)
+        except Exception as e:
+            log.warning(f"Attempt {attempt}/{args.max_retries}: {type(e).__name__}: {e}")
+            prefetched = None
+            if attempt < args.max_retries:
+                time.sleep(args.retry_delay * attempt)
+
+    if outputs is None:
+        log.error(f"All retries failed, skipping batch.")
+        outputs = [""] * len(batch)
+
+    for r, out in zip(batch, outputs):
+        idx = str(r["idx"])
+        if is_valid_output(r["latex"], out):
+            writer.write({"idx": r["idx"], "latex": out, "source": r["source"]})
+            ckpt.mark_done(idx)
+            stats["success"] += 1
+        else:
+            reason = "empty"     if not out or len(out.strip()) < 2 else \
+                     "unchanged" if out.strip() == r["latex"].strip() else "too_long"
+            ckpt.mark_failed(idx, reason)
+            stats["failed"] += 1
+
+    return new_fut
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",          type=str,   default="Qwen/Qwen3-8B")
+    ap.add_argument("--model",          type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
     ap.add_argument("--raw_dir",        type=str,   default=str(DATASET_DIR))
     ap.add_argument("--out_dir",        type=str,   default=str(OUT_DIR))
-    ap.add_argument("--n_samples",      type=int,   default=50_000)
-    ap.add_argument("--batch_size",     type=int,   default=96)
-    ap.add_argument("--max_new_tokens", type=int,   default=128)
+    ap.add_argument("--n_samples",      type=int,   default=1_400_000)
+    ap.add_argument("--chunk_size",     type=int,   default=20_000)
+    ap.add_argument("--batch_size",     type=int,   default=128)
+    ap.add_argument("--max_new_tokens", type=int,   default=96)
     ap.add_argument("--shard_size",     type=int,   default=5_000)
     ap.add_argument("--ckpt_every",     type=int,   default=50)
     ap.add_argument("--gc_every",       type=int,   default=200)
@@ -354,108 +362,69 @@ def main():
     log.addHandler(fh)
 
     log.info("=" * 60)
-    log.info("  LaTeX Augmentation  |  Qwen3-8B  |  2x T4 15GB")
+    log.info(f"  LaTeX Augmentation  |  Qwen2.5-Math-1.5B  |  2x T4 15GB")
     log.info("=" * 60)
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
-
-    log.info(f"Loading up to {args.n_samples:,} samples from {args.raw_dir}...")
-    records = load_latex_corpus(Path(args.raw_dir), args.n_samples, args.seed)
-    log.info(f"  loaded: {len(records):,}")
-
-    for r in records:
-        r["transform"] = rng.choice(_TRANSFORMS)
-        r["messages"]  = build_messages(r["latex"], r["transform"])
-
-    pending      = [r for r in records if not ckpt.is_done(str(r["idx"]))]
-    already_done = len(records) - len(pending)
-    log.info(f"Done: {already_done:,}  |  Remaining: {len(pending):,}")
-
-    if not pending:
-        log.info("All samples already processed. Nothing to do.")
-        return
-
-    pending.sort(key=lambda r: len(r["latex"]))
-    log.info("Samples sorted by latex length to minimize padding ✓")
-
     model, tokenizer = load_model(args.model)
 
-    stats = {"success": 0, "failed": 0}
-    bs    = args.batch_size
+    stats      = {"success": 0, "failed": 0, "skipped": 0}
+    total_seen = 0
+    batch_no   = 0
+    executor   = ThreadPoolExecutor(max_workers=1)
+    chunk: list[dict] = []
 
-    def _tokenize(batch):
-        return tokenize_batch(tokenizer, batch)
+    pbar = tqdm(desc="Augmenting", ncols=90, unit="batch")
 
-    batches   = [pending[s : s + bs] for s in range(0, len(pending), bs)]
-    n_batches = len(batches)
+    def flush_chunk(chunk):
+        nonlocal batch_no
+        chunk.sort(key=lambda r: len(r["latex"]))
+        batches      = [chunk[s: s + args.batch_size] for s in range(0, len(chunk), args.batch_size)]
+        n            = len(batches)
+        prefetch_fut = executor.submit(tokenize_batch, tokenizer, batches[0])
 
-    executor     = ThreadPoolExecutor(max_workers=1)
-    prefetch_fut = executor.submit(_tokenize, batches[0]) if batches else None
+        for i, batch in enumerate(batches):
+            next_b = batches[i + 1] if i + 1 < n else None
+            prefetch_fut = process_batch(
+                batch, model, tokenizer, args, ckpt, writer, stats,
+                executor, prefetch_fut, next_b,
+            )
+            batch_no += 1
+            pbar.update(1)
+            pbar.set_postfix(ok=stats["success"], fail=stats["failed"], seen=total_seen)
 
-    pbar = tqdm(range(n_batches), desc="Augmenting", ncols=90)
-    for batch_no in pbar:
-        batch = batches[batch_no]
-
-        prefetched = prefetch_fut.result() if prefetch_fut is not None else None
-
-        if batch_no + 1 < n_batches:
-            prefetch_fut = executor.submit(_tokenize, batches[batch_no + 1])
-        else:
-            prefetch_fut = None
-
-        outputs = None
-        for attempt in range(1, args.max_retries + 1):
-            try:
-                outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens,
-                                         prefetched_inputs=prefetched)
-                prefetched = None
-                break
-            except torch.cuda.OutOfMemoryError:
-                log.warning(f"OOM batch {batch_no} attempt {attempt}/{args.max_retries} — clearing cache")
+            if batch_no % args.ckpt_every == 0:
+                ckpt.save()
+            if batch_no % args.gc_every == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
-                prefetched = None
-                if attempt < args.max_retries:
-                    time.sleep(args.retry_delay)
-            except Exception as e:
-                log.warning(f"Batch {batch_no} attempt {attempt}/{args.max_retries}: {type(e).__name__}: {e}")
-                prefetched = None
-                if attempt < args.max_retries:
-                    time.sleep(args.retry_delay * attempt)
+                log_gpu_memory()
 
-        if outputs is None:
-            log.error(f"All {args.max_retries} retries failed for batch {batch_no}, skipping.")
-            outputs = [""] * len(batch)
+    for record in iter_parquet_files(Path(args.raw_dir)):
+        if total_seen >= args.n_samples:
+            break
 
-        for r, out in zip(batch, outputs):
-            idx = str(r["idx"])
-            if is_valid_output(r["latex"], out):
-                writer.write({
-                    "idx":    r["idx"],
-                    "latex":  out,
-                    "source": r["source"],
-                })
-                ckpt.mark_done(idx)
-                stats["success"] += 1
-            else:
-                reason = "empty" if not out or len(out.strip()) < 2 else \
-                         "unchanged" if out.strip() == r["latex"].strip() else "too_long"
-                if batch_no == 0:
-                    log.debug(f"  FAIL [{reason}] orig={r['latex'][:60]!r} → out={out[:60]!r}")
-                ckpt.mark_failed(idx, reason)
-                stats["failed"] += 1
+        idx_str = str(record["idx"])
+        if ckpt.is_done(idx_str):
+            stats["skipped"] += 1
+            continue
 
-        pbar.set_postfix(ok=stats["success"], fail=stats["failed"])
+        total_seen += 1
+        record["transform"] = rng.choice(_TRANSFORMS)
+        record["messages"]  = build_messages(record["latex"], record["transform"])
+        chunk.append(record)
 
-        if (batch_no + 1) % args.ckpt_every == 0:
-            ckpt.save()
-
-        if (batch_no + 1) % args.gc_every == 0:
+        if len(chunk) >= args.chunk_size:
+            flush_chunk(chunk)
+            chunk.clear()
             gc.collect()
-            torch.cuda.empty_cache()
-            log_gpu_memory()
 
+    if chunk:
+        flush_chunk(chunk)
+        chunk.clear()
+
+    pbar.close()
     ckpt.save()
     executor.shutdown(wait=False)
 
@@ -469,6 +438,7 @@ def main():
     log.info("─" * 45)
     log.info(f"Success : {stats['success']:,}")
     log.info(f"Failed  : {stats['failed']:,}")
+    log.info(f"Skipped : {stats['skipped']:,}")
     log.info(f"Output  : {out_dir}")
     for p in final_paths:
         log.info(f"  {p.name}")
