@@ -216,7 +216,7 @@ def load_model(model_name: str, gpu_id: int | None = None, load_in_4bit: bool = 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    device_map = f"cuda:{gpu_id}" if gpu_id is not None else "auto"
+    device_map = f"cuda:{gpu_id}" if gpu_id is not None else "cuda:0"
 
     if load_in_4bit:
         from transformers import BitsAndBytesConfig
