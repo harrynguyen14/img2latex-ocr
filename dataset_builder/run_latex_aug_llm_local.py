@@ -2,35 +2,24 @@ import argparse
 import gc
 import json
 import logging
-import os
 import random
 import re
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+import torch.backends.cudnn as cudnn
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 warnings.filterwarnings("ignore")
 
-# Auto-detect attention backend based on GPU compute capability.
-# FA2 requires sm>=8.0 (Ampere+). sm75 (Turing: 2080 Ti) needs XFORMERS.
-def _set_attention_backend():
-    if not torch.cuda.is_available():
-        return
-    cc = torch.cuda.get_device_capability(0)
-    sm = cc[0] * 10 + cc[1]
-    if sm < 80:
-        os.environ.setdefault("VLLM_ATTENTION_BACKEND", "XFORMERS")
-        return "XFORMERS"
-    return "FLASH_ATTN"
-
-_attn_backend = _set_attention_backend()
-
-from vllm import LLM, SamplingParams
+cudnn.enabled   = True
+cudnn.benchmark = True  # auto-tune kernels for fixed input sizes
 
 DATASET_DIR = Path("D:/dataset-ocr-builder/latex-ocr-dataset/train/raw")
 OUT_DIR     = Path("D:/dataset-ocr-builder/latex-ocr-dataset/train/heavy_text")
@@ -43,9 +32,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("latex_aug")
 
-for _noisy in ("httpx", "httpcore", "huggingface_hub", "huggingface_hub.file_download",
-               "filelock", "transformers", "accelerate", "vllm"):
+for _noisy in ("httpx", "httpcore", "urllib3", "urllib3.connectionpool",
+               "huggingface_hub", "huggingface_hub.file_download",
+               "filelock", "transformers", "accelerate", "matplotlib"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+# Suppress root logger DEBUG from third-party libs
+logging.getLogger().setLevel(logging.WARNING)
+log.setLevel(logging.DEBUG)
 
 _SYSTEM_PROMPT = (
     "You are a LaTeX rewriting assistant. "
@@ -218,11 +212,28 @@ def log_gpu_memory():
         log.info(f"  GPU {i}: {used:.2f} / {total:.2f} GB")
 
 
-def build_prompt(latex: str, transform: str, tokenizer) -> str:
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user",   "content": _TRANSFORM_TEMPLATES[transform].replace("{latex}", latex)},
-    ]
+def load_model(model_name: str):
+    log.info(f"Loading {model_name}  |  fp16  |  cuDNN benchmark={cudnn.benchmark}")
+
+    from transformers.utils import logging as hf_logging
+    hf_logging.disable_progress_bar()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        dtype      = torch.float16,
+        device_map = "cuda:0",
+    )
+    model.eval()
+    log.info("Model ready ✓")
+    log_gpu_memory()
+    return model, tokenizer
+
+
+def build_prompt(messages: list[dict], tokenizer) -> str:
     return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -230,45 +241,110 @@ def build_prompt(latex: str, transform: str, tokenizer) -> str:
     )
 
 
-def load_model(model_name: str, tensor_parallel_size: int, gpu_memory_utilization: float,
-               quantization: str | None):
-    log.info(f"Loading {model_name}  |  vLLM  |  tp={tensor_parallel_size}  quant={quantization or 'fp16'}")
+def build_messages(latex: str, transform: str) -> list[dict]:
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user",   "content": _TRANSFORM_TEMPLATES[transform].replace("{latex}", latex)},
+    ]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
 
-    llm = LLM(
-        model                  = model_name,
-        dtype                  = "float16",
-        tensor_parallel_size   = tensor_parallel_size,
-        gpu_memory_utilization = gpu_memory_utilization,
-        quantization           = quantization,
-        trust_remote_code      = True,
-        max_model_len          = 640,   # 512 input + 128 output
-        disable_log_stats      = True,
+def tokenize_batch(tokenizer, batch: list[dict]) -> dict:
+    texts = [build_prompt(item["messages"], tokenizer) for item in batch]
+    return tokenizer(
+        texts,
+        return_tensors = "pt",
+        padding        = True,
+        truncation     = True,
+        max_length     = 512,
     )
-    log.info("Model ready ✓")
-    log_gpu_memory()
-    return llm, tokenizer
+
+
+def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
+                   prefetched_inputs: dict | None = None) -> list[str]:
+    cpu_inputs = prefetched_inputs if prefetched_inputs is not None \
+                 else tokenize_batch(tokenizer, batch)
+    inputs = {k: v.cuda() for k, v in cpu_inputs.items()}
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            input_ids          = inputs["input_ids"],
+            attention_mask     = inputs["attention_mask"],
+            max_new_tokens     = max_new_tokens,
+            do_sample          = False,
+            repetition_penalty = 1.1,
+            use_cache          = True,
+            pad_token_id       = tokenizer.pad_token_id,
+            eos_token_id       = tokenizer.eos_token_id,
+        )
+
+    input_len = inputs["input_ids"].shape[1]
+    decoded   = tokenizer.batch_decode(output_ids[:, input_len:], skip_special_tokens=True)
+    results   = [clean_output(t) for t in decoded]
+
+    del inputs, output_ids
+    return results
+
+
+def process_batch(batch, model, tokenizer, args, ckpt, writer, stats,
+                  executor, prefetch_fut, next_batch):
+    prefetched = prefetch_fut.result() if prefetch_fut is not None else None
+    new_fut    = executor.submit(tokenize_batch, tokenizer, next_batch) \
+                 if next_batch is not None else None
+
+    outputs = None
+    for attempt in range(1, args.max_retries + 1):
+        try:
+            outputs = batch_generate(model, tokenizer, batch, args.max_new_tokens,
+                                     prefetched_inputs=prefetched)
+            prefetched = None
+            break
+        except torch.cuda.OutOfMemoryError:
+            log.warning(f"OOM attempt {attempt}/{args.max_retries} — clearing cache")
+            gc.collect()
+            torch.cuda.empty_cache()
+            prefetched = None
+            if attempt < args.max_retries:
+                time.sleep(args.retry_delay)
+        except Exception as e:
+            log.warning(f"Attempt {attempt}/{args.max_retries}: {type(e).__name__}: {e}")
+            prefetched = None
+            if attempt < args.max_retries:
+                time.sleep(args.retry_delay * attempt)
+
+    if outputs is None:
+        log.error("All retries failed, skipping batch.")
+        outputs = [""] * len(batch)
+
+    for r, out in zip(batch, outputs):
+        idx = str(r["idx"])
+        if is_valid_output(r["latex"], out):
+            writer.write({"idx": r["idx"], "latex": out, "source": r["source"]})
+            ckpt.mark_done(idx)
+            stats["success"] += 1
+        else:
+            reason = "empty"     if not out or len(out.strip()) < 2 else \
+                     "unchanged" if out.strip() == r["latex"].strip() else "too_long"
+            ckpt.mark_failed(idx, reason)
+            stats["failed"] += 1
+
+    return new_fut
 
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",                  type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
-    ap.add_argument("--raw_dir",                type=str,   default=str(DATASET_DIR))
-    ap.add_argument("--out_dir",                type=str,   default=str(OUT_DIR))
-    ap.add_argument("--n_samples",              type=int,   default=1_400_000)
-    ap.add_argument("--batch_size",             type=int,   default=32)
-    ap.add_argument("--max_new_tokens",         type=int,   default=128)
-    ap.add_argument("--shard_size",             type=int,   default=5_000)
-    ap.add_argument("--ckpt_every",             type=int,   default=10)
-    ap.add_argument("--max_retries",            type=int,   default=3)
-    ap.add_argument("--seed",                   type=int,   default=SEED)
-    ap.add_argument("--tensor_parallel_size",   type=int,   default=1)
-    ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
-    ap.add_argument("--quantization",           type=str,   default=None,
-                    help="vLLM quantization: awq, gptq, or None for fp16")
+    ap.add_argument("--model",          type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
+    ap.add_argument("--raw_dir",        type=str,   default=str(DATASET_DIR))
+    ap.add_argument("--out_dir",        type=str,   default=str(OUT_DIR))
+    ap.add_argument("--n_samples",      type=int,   default=1_400_000)
+    ap.add_argument("--chunk_size",     type=int,   default=20_000)
+    ap.add_argument("--batch_size",     type=int,   default=128)   # 8GB VRAM safe
+    ap.add_argument("--max_new_tokens", type=int,   default=128)
+    ap.add_argument("--shard_size",     type=int,   default=5_000)
+    ap.add_argument("--ckpt_every",     type=int,   default=50)
+    ap.add_argument("--gc_every",       type=int,   default=200)
+    ap.add_argument("--max_retries",    type=int,   default=3)
+    ap.add_argument("--retry_delay",    type=float, default=2.0)
+    ap.add_argument("--seed",           type=int,   default=SEED)
     return ap.parse_args()
 
 
@@ -283,58 +359,44 @@ def main():
     log.addHandler(fh)
 
     log.info("=" * 60)
-    log.info(f"  LaTeX Augmentation  |  vLLM  |  {args.model}")
+    log.info(f"  LaTeX Augmentation  |  HF Transformers  |  RTX 2080 8GB")
     log.info("=" * 60)
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
-
-    llm, tokenizer = load_model(
-        args.model,
-        tensor_parallel_size   = args.tensor_parallel_size,
-        gpu_memory_utilization = args.gpu_memory_utilization,
-        quantization           = args.quantization,
-    )
-
-    sampling_params = SamplingParams(
-        temperature        = 0.7,
-        top_p              = 0.8,
-        top_k              = 20,
-        repetition_penalty = 1.1,
-        max_tokens         = args.max_new_tokens,
-    )
+    model, tokenizer = load_model(args.model)
 
     stats      = {"success": 0, "failed": 0, "skipped": 0}
     total_seen = 0
     batch_no   = 0
-    batch: list[dict] = []
+    executor   = ThreadPoolExecutor(max_workers=1)
+    chunk: list[dict] = []
 
     pbar = tqdm(desc="Augmenting", ncols=90, unit="sample", total=args.n_samples)
 
-    def flush_batch(batch: list[dict]):
+    def flush_chunk(chunk):
         nonlocal batch_no
-        prompts = [build_prompt(r["latex"], r["transform"], tokenizer) for r in batch]
+        chunk.sort(key=lambda r: len(r["latex"]))
+        batches      = [chunk[s: s + args.batch_size] for s in range(0, len(chunk), args.batch_size)]
+        n            = len(batches)
+        prefetch_fut = executor.submit(tokenize_batch, tokenizer, batches[0])
 
-        outputs = llm.generate(prompts, sampling_params)
+        for i, batch in enumerate(batches):
+            next_b = batches[i + 1] if i + 1 < n else None
+            prefetch_fut = process_batch(
+                batch, model, tokenizer, args, ckpt, writer, stats,
+                executor, prefetch_fut, next_b,
+            )
+            batch_no += 1
+            pbar.update(len(batch))
+            pbar.set_postfix(ok=stats["success"], fail=stats["failed"], seen=total_seen)
 
-        for r, out in zip(batch, outputs):
-            text = clean_output(out.outputs[0].text)
-            idx  = str(r["idx"])
-            if is_valid_output(r["latex"], text):
-                writer.write({"idx": r["idx"], "latex": text, "source": r["source"]})
-                ckpt.mark_done(idx)
-                stats["success"] += 1
-            else:
-                reason = "empty"     if not text or len(text.strip()) < 2 else \
-                         "unchanged" if text.strip() == r["latex"].strip() else "too_long"
-                ckpt.mark_failed(idx, reason)
-                stats["failed"] += 1
-
-        pbar.update(len(batch))
-        pbar.set_postfix(ok=stats["success"], fail=stats["failed"], seen=total_seen)
-        batch_no += 1
-        if batch_no % args.ckpt_every == 0:
-            ckpt.save()
+            if batch_no % args.ckpt_every == 0:
+                ckpt.save()
+            if batch_no % args.gc_every == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+                log_gpu_memory()
 
     for record in iter_parquet_files(Path(args.raw_dir)):
         if total_seen >= args.n_samples:
@@ -347,21 +409,28 @@ def main():
 
         total_seen += 1
         record["transform"] = rng.choice(_TRANSFORMS)
-        batch.append(record)
+        record["messages"]  = build_messages(record["latex"], record["transform"])
+        chunk.append(record)
 
-        if len(batch) >= args.batch_size:
-            flush_batch(batch)
-            batch.clear()
+        if len(chunk) >= args.chunk_size:
+            flush_chunk(chunk)
+            chunk.clear()
             gc.collect()
 
-    if batch:
-        flush_batch(batch)
-        batch.clear()
+    if chunk:
+        flush_chunk(chunk)
+        chunk.clear()
 
     pbar.close()
     ckpt.save()
+    executor.shutdown(wait=False)
 
     final_paths = writer.finalize()
+
+    del model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    log.info("Model unloaded ✓")
 
     log.info("─" * 45)
     log.info(f"Success : {stats['success']:,}")
