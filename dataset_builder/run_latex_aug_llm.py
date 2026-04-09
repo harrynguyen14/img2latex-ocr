@@ -66,20 +66,40 @@ for _noisy in ("httpx", "httpcore", "huggingface_hub", "huggingface_hub.file_dow
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (
-    "You are a LaTeX math expert. "
-    "When given a LaTeX math expression, apply ONE of the following transformations "
-    "and return ONLY the transformed LaTeX — no explanation, no markdown, no $...$ wrapper:\n"
-    "1. Expand: expand algebraic expressions (e.g. (a+b)^2 → a^2+2ab+b^2)\n"
-    "2. Factor: factor expressions (e.g. a^2-b^2 → (a+b)(a-b))\n"
-    "3. Commute: reorder commutative terms (e.g. a+b+c → c+a+b)\n"
-    "4. Neutral: add neutral elements (e.g. x → x + y - y)\n"
-    "5. Constant: replace symbolic constant with numeric (e.g. \\pi → 3.14159)\n"
-    "Return the LaTeX expression ONLY. If transformation is not applicable, "
-    "return the original expression unchanged."
+    "You are a LaTeX rewriting assistant. "
+    "You will receive a LaTeX math expression and a rewrite instruction. "
+    "You MUST rewrite the expression — never return it unchanged. "
+    "Output ONLY the rewritten LaTeX, no explanation, no markdown, no $...$ wrapper."
 )
 
-_TRANSFORMS    = ["expand", "factor", "commute", "neutral", "constant"]
-_USER_TEMPLATE = "Transform this LaTeX expression using '{transform}':\n{latex}"
+# Template riêng cho từng transform — cụ thể hơn để tránh unchanged
+_TRANSFORM_TEMPLATES = {
+    "commute": (
+        "Reorder the terms or factors in this expression (e.g. a+b → b+a, xy → yx). "
+        "Pick any subexpression and swap its order.\n{latex}"
+    ),
+    "neutral": (
+        "Add a neutral element to this expression without changing its value "
+        "(e.g. add +0, add -0, multiply by 1, add x-x for any variable x present).\n{latex}"
+    ),
+    "expand": (
+        "Expand or distribute any product, power, or fraction in this expression "
+        "(e.g. (a+b)^2 → a^2+2ab+b^2, 2(x+y) → 2x+2y). "
+        "If nothing to expand, rewrite a fraction as a sum.\n{latex}"
+    ),
+    "factor": (
+        "Factor or group terms in this expression "
+        "(e.g. a^2-b^2 → (a+b)(a-b), 2x+2y → 2(x+y)). "
+        "If nothing to factor, group any repeated subexpression.\n{latex}"
+    ),
+    "constant": (
+        "Replace any symbolic constant or variable with a plausible numeric value, "
+        "or replace a number with an equivalent expression "
+        "(e.g. \\pi → 3.14159, e → 2.71828, 1 → \\frac{2}{2}, 0 → 1-1).\n{latex}"
+    ),
+}
+
+_TRANSFORMS = list(_TRANSFORM_TEMPLATES.keys())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -262,7 +282,7 @@ def load_model(model_name: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config = build_bnb_config(),
-        device_map          = "balanced",  # chia đều layers giữa 2 GPU thay vì "auto" fill GPU0 trước
+        device_map          = "auto",  # để accelerate tự quyết — balanced không hiệu quả với BnB quantized model
         max_memory          = max_mem,
     )
     model.eval()
@@ -276,10 +296,9 @@ def load_model(model_name: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_messages(latex: str, transform: str) -> list[dict]:
-    # Qwen3: system prompt không được dùng khi enable_thinking=False qua chat_template
-    # → ghép system vào user message để tránh conflict
+    user_content = _TRANSFORM_TEMPLATES[transform].format(latex=latex)
     return [
-        {"role": "user", "content": _SYSTEM_PROMPT + "\n\n" + _USER_TEMPLATE.format(transform=transform, latex=latex)},
+        {"role": "user", "content": _SYSTEM_PROMPT + "\n\n" + user_content},
     ]
 
 
@@ -321,10 +340,12 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
             input_ids      = inputs["input_ids"],
             attention_mask = inputs["attention_mask"],
             max_new_tokens = max_new_tokens,
-            do_sample      = False,
+            do_sample      = True,
+            temperature    = 0.3,   # đủ để thử transform, không quá random làm hỏng LaTeX
+            top_p          = 0.9,
             use_cache      = True,
             pad_token_id   = tokenizer.pad_token_id,
-            eos_token_id   = tokenizer.eos_token_id,  # early stop khi model xong
+            eos_token_id   = tokenizer.eos_token_id,
         )
 
     input_len = inputs["input_ids"].shape[1]
