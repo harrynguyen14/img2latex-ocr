@@ -307,17 +307,20 @@ def get_first_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
+def build_prompt(messages: list[dict]) -> str:
+    """Build Qwen3 chat prompt thủ công — nhanh hơn Jinja2 apply_chat_template ~10x."""
+    # Format: <|im_start|>role\ncontent<|im_end|>\n
+    # Với enable_thinking=False: assistant prefix là <|im_start|>assistant\n<think>\n\n</think>\n
+    text = ""
+    for msg in messages:
+        text += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+    text += "<|im_start|>assistant\n<think>\n\n</think>\n"
+    return text
+
+
 def tokenize_batch(tokenizer, batch: list[dict]) -> dict:
     """Tokenize batch trên CPU — an toàn chạy trên background thread (không .to(device))."""
-    texts = [
-        tokenizer.apply_chat_template(
-            item["messages"],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        for item in batch
-    ]
+    texts = [build_prompt(item["messages"]) for item in batch]
     return tokenizer(
         texts,
         return_tensors = "pt",
@@ -349,10 +352,8 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
         )
 
     input_len = inputs["input_ids"].shape[1]
-    results = [
-        clean_output(tokenizer.decode(ids[input_len:], skip_special_tokens=True))
-        for ids in output_ids
-    ]
+    decoded = tokenizer.batch_decode(output_ids[:, input_len:], skip_special_tokens=True)
+    results = [clean_output(t) for t in decoded]
 
     del inputs, output_ids
     return results
@@ -368,8 +369,8 @@ def parse_args():
     ap.add_argument("--raw_dir",    type=str, default=str(DATASET_DIR))
     ap.add_argument("--out_dir",    type=str, default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=50_000)
-    ap.add_argument("--batch_size",     type=int,   default=32)   # 2x T4: VRAM còn trống nhiều, tăng lên 32
-    ap.add_argument("--max_new_tokens", type=int,   default=128)  # p99 input=35tok → output expand ~3x=105tok; +buffer=128
+    ap.add_argument("--batch_size",     type=int,   default=64)   # GPU dùng ~6.5/15GB → còn ~8GB, tăng batch để tận dụng
+    ap.add_argument("--max_new_tokens", type=int,   default=96)   # thực tế transform output < 96 tok; eos_token_id sẽ stop sớm hơn
     ap.add_argument("--shard_size",     type=int,   default=5_000)
     ap.add_argument("--ckpt_every",     type=int,   default=50,
                     help="Save checkpoint mỗi N batch")
@@ -378,6 +379,13 @@ def parse_args():
     ap.add_argument("--max_retries",    type=int,   default=3)
     ap.add_argument("--retry_delay",    type=float, default=2.0)
     ap.add_argument("--seed",           type=int,   default=SEED)
+    # Multi-GPU: chạy 2 process độc lập, mỗi process 1 GPU xử lý nửa dataset
+    ap.add_argument("--gpu_id",   type=int, default=None,
+                    help="GPU index để dùng (0 hoặc 1). None = dùng tất cả GPU (device_map=auto)")
+    ap.add_argument("--worker_id",   type=int, default=0,
+                    help="Worker index (0 hoặc 1) — quyết định nửa dataset nào sẽ xử lý")
+    ap.add_argument("--num_workers", type=int, default=1,
+                    help="Tổng số workers đang chạy song song")
     return ap.parse_args()
 
 
