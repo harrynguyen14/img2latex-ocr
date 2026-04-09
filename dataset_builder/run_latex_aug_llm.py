@@ -203,8 +203,9 @@ def log_gpu_memory():
         log.info(f"  GPU {i}: {used:.2f} / {total:.2f} GB")
 
 
-def load_model(model_name: str):
-    log.info(f"Loading {model_name}  |  fp16")
+def load_model(model_name: str, gpu_id: int | None = None, load_in_4bit: bool = False):
+    quant_str = "int4" if load_in_4bit else "fp16"
+    log.info(f"Loading {model_name}  |  {quant_str}")
 
     from transformers.utils import logging as hf_logging
     hf_logging.disable_progress_bar()
@@ -215,24 +216,29 @@ def load_model(model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    n_gpu = torch.cuda.device_count()
-    if n_gpu > 1:
-        # Replicate full model on GPU 0, wrap with DataParallel for balanced load.
-        # Pipeline (device_map=auto) leaves GPU 0 idle while GPU 1 runs — avoid it.
+    device_map = f"cuda:{gpu_id}" if gpu_id is not None else "auto"
+
+    if load_in_4bit:
+        from transformers import BitsAndBytesConfig
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit              = True,
+            bnb_4bit_compute_dtype    = torch.float16,
+            bnb_4bit_use_double_quant = True,
+            bnb_4bit_quant_type       = "nf4",
+        )
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype      = torch.float16,
-            device_map = "cuda:0",
+            quantization_config = bnb_cfg,
+            device_map          = device_map,
         )
-        model = torch.nn.DataParallel(model)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             dtype      = torch.float16,
-            device_map = "auto",
+            device_map = device_map,
         )
     model.eval()
-    log.info(f"Model ready ✓  ({n_gpu} GPU(s){'  DataParallel' if n_gpu > 1 else ''})")
+    log.info(f"Model ready ✓  ({quant_str}, device={device_map})")
     log_gpu_memory()
     return model, tokenizer
 
@@ -246,8 +252,7 @@ def build_messages(latex: str, transform: str) -> list[dict]:
 
 
 def get_first_device(model) -> torch.device:
-    m = model.module if isinstance(model, torch.nn.DataParallel) else model
-    return next(m.parameters()).device
+    return next(model.parameters()).device
 
 
 def build_prompt(messages: list[dict], tokenizer) -> str:
@@ -276,9 +281,8 @@ def batch_generate(model, tokenizer, batch: list[dict], max_new_tokens: int,
                  else tokenize_batch(tokenizer, batch)
     inputs = {k: v.to(first_device) for k, v in cpu_inputs.items()}
 
-    gen_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     with torch.no_grad():
-        output_ids = gen_model.generate(
+        output_ids = model.generate(
             input_ids          = inputs["input_ids"],
             attention_mask     = inputs["attention_mask"],
             max_new_tokens     = max_new_tokens,
@@ -361,6 +365,7 @@ def parse_args():
     ap.add_argument("--max_retries",    type=int,   default=3)
     ap.add_argument("--retry_delay",    type=float, default=2.0)
     ap.add_argument("--seed",           type=int,   default=SEED)
+    ap.add_argument("--load_in_4bit",   action="store_true")
     return ap.parse_args()
 
 
@@ -380,7 +385,7 @@ def main():
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
-    model, tokenizer = load_model(args.model)
+    model, tokenizer = load_model(args.model, load_in_4bit=args.load_in_4bit)
 
     stats      = {"success": 0, "failed": 0, "skipped": 0}
     total_seen = 0
