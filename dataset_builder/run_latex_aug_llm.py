@@ -11,6 +11,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
@@ -32,7 +33,7 @@ _attn_backend = _set_attention_backend()
 
 from vllm import LLM, SamplingParams
 
-DATASET_DIR = Path("D:/dataset-ocr-builder/latex-ocr-dataset/train/raw")
+HF_DATASET  = "harryrobert/latex-raw"
 OUT_DIR     = Path("D:/dataset-ocr-builder/latex-ocr-dataset/train/heavy_text")
 SEED        = 42
 
@@ -173,19 +174,13 @@ class ShardWriter:
         return final_paths
 
 
-def iter_parquet_files(raw_dir: Path):
-    for pfile in sorted(raw_dir.glob("*.parquet")):
-        tbl = pq.read_table(str(pfile), columns=["idx", "latex", "source"])
-        rows = list(zip(
-            tbl["idx"].to_pylist(),
-            tbl["latex"].to_pylist(),
-            tbl["source"].to_pylist(),
-        ))
-        del tbl
-        for idx, lat, src in rows:
-            if lat and is_augmentable(lat):
-                yield {"idx": idx, "latex": lat, "source": src}
-        gc.collect()
+def iter_hf_dataset(hf_dataset: str, hf_token: str | None = None):
+    log.info(f"Loading dataset from HuggingFace: {hf_dataset}")
+    ds = load_dataset(hf_dataset, split="train", token=hf_token)
+    for row in ds:
+        lat = row.get("latex")
+        if lat and is_augmentable(lat):
+            yield {"idx": row["idx"], "latex": lat, "source": row.get("source", "")}
 
 
 def clean_output(raw: str) -> str:
@@ -256,7 +251,9 @@ def load_model(model_name: str, tensor_parallel_size: int, gpu_memory_utilizatio
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model",                  type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
-    ap.add_argument("--raw_dir",                type=str,   default=str(DATASET_DIR))
+    ap.add_argument("--hf_dataset",             type=str,   default=HF_DATASET)
+    ap.add_argument("--hf_token",               type=str,   default=None,
+                    help="HuggingFace API token (optional for public datasets)")
     ap.add_argument("--out_dir",                type=str,   default=str(OUT_DIR))
     ap.add_argument("--n_samples",              type=int,   default=1_400_000)
     ap.add_argument("--batch_size",             type=int,   default=32)
@@ -336,7 +333,7 @@ def main():
         if batch_no % args.ckpt_every == 0:
             ckpt.save()
 
-    for record in iter_parquet_files(Path(args.raw_dir)):
+    for record in iter_hf_dataset(args.hf_dataset, args.hf_token):
         if total_seen >= args.n_samples:
             break
 
