@@ -17,6 +17,14 @@ from transformers import AutoTokenizer
 
 warnings.filterwarnings("ignore")
 
+# Redirect HF/torch cache away from root filesystem (only 1.9G free on /)
+# to the large data mount which has ~940G free.
+_CACHE_ROOT = os.environ.get("CACHE_ROOT", "/workspace")
+os.environ.setdefault("HF_HOME",             f"{_CACHE_ROOT}/.cache/huggingface")
+os.environ.setdefault("HF_DATASETS_CACHE",   f"{_CACHE_ROOT}/.cache/huggingface/datasets")
+os.environ.setdefault("TRANSFORMERS_CACHE",  f"{_CACHE_ROOT}/.cache/huggingface/hub")
+os.environ.setdefault("TORCH_HOME",          f"{_CACHE_ROOT}/.cache/torch")
+
 # Auto-detect attention backend based on GPU compute capability.
 # FA2 requires sm>=8.0 (Ampere+). sm75 (Turing: 2080 Ti) needs XFORMERS.
 def _set_attention_backend():
