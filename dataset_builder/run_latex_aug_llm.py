@@ -228,18 +228,26 @@ def load_model(model_name: str):
 
 
 def flush_batch(batch: list[dict], model, tokenizer, args, writer, ckpt, stats, pbar, batch_no_ref):
-    messages_list = [build_messages(r["latex"], r["transform"]) for r in batch]
     prompts = [
-        tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
-        for m in messages_list
+        tokenizer.apply_chat_template(
+            build_messages(r["latex"], r["transform"]),
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for r in batch
     ]
 
+    # Sort by prompt length — minimizes padding within batch (dynamic padding)
+    order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
+    batch_sorted   = [batch[i]   for i in order]
+    prompts_sorted = [prompts[i] for i in order]
+
     inputs = tokenizer(
-        prompts,
-        return_tensors   = "pt",
-        padding          = True,
-        truncation       = True,
-        max_length       = 512,
+        prompts_sorted,
+        return_tensors = "pt",
+        padding        = True,
+        truncation     = True,
+        max_length     = 512,
     ).to("cuda")
 
     with torch.no_grad():
@@ -254,9 +262,10 @@ def flush_batch(batch: list[dict], model, tokenizer, args, writer, ckpt, stats, 
             pad_token_id       = tokenizer.pad_token_id,
         )
 
-    input_len = inputs["input_ids"].shape[1]
-    for r, out_ids in zip(batch, outputs):
-        text = tokenizer.decode(out_ids[input_len:], skip_special_tokens=True)
+    # Each sequence has different input length due to left-padding
+    input_lens = inputs["attention_mask"].sum(dim=1).tolist()
+    for r, out_ids, inp_len in zip(batch_sorted, outputs, input_lens):
+        text = tokenizer.decode(out_ids[int(inp_len):], skip_special_tokens=True)
         text = clean_output(text)
         idx  = str(r["idx"])
         if is_valid_output(r["latex"], text):
@@ -283,7 +292,7 @@ def parse_args():
     ap.add_argument("--hf_token",       type=str,   default=None)
     ap.add_argument("--out_dir",        type=str,   default=str(OUT_DIR))
     ap.add_argument("--n_samples",      type=int,   default=1_400_000)
-    ap.add_argument("--batch_size",     type=int,   default=32)   # RTX 3090 Ti, tune nếu OOM
+    ap.add_argument("--batch_size",     type=int,   default=256)  # RTX 3090 Ti 24GB, model ~3GB
     ap.add_argument("--max_new_tokens", type=int,   default=128)
     ap.add_argument("--shard_size",     type=int,   default=5_000)
     ap.add_argument("--ckpt_every",     type=int,   default=10)
