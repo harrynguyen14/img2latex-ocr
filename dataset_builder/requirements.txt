@@ -1,6 +1,6 @@
-vllm
 transformers
 datasets
-torch
 pyarrow
 tqdm
+flash-attn
+
