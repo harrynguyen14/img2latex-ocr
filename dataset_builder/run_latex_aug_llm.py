@@ -318,15 +318,23 @@ def main():
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
     model, tokenizer = load_model(args.model)
 
-    stats     = {"success": 0, "failed": 0, "skipped": 0}
+    stats      = {"success": 0, "failed": 0, "skipped": 0}
     total_seen = 0
-    batch_no  = [0]
+    batch_no   = [0]
     batch: list[dict] = []
+    stop = [False]
+
+    import signal
+    def _handler(*_):
+        log.warning("Interrupt received — finishing current batch then saving...")
+        stop[0] = True
+    signal.signal(signal.SIGINT,  _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
     pbar = tqdm(desc="Augmenting", ncols=90, unit="sample", total=args.n_samples)
 
     for record in iter_hf_dataset(args.hf_dataset, args.hf_token):
-        if total_seen >= args.n_samples:
+        if total_seen >= args.n_samples or stop[0]:
             break
 
         idx_str = str(record["idx"])
