@@ -2,5 +2,4 @@ transformers
 datasets
 pyarrow
 tqdm
-flash-attn
 
