@@ -2,4 +2,4 @@ transformers
 datasets
 pyarrow
 tqdm
-
+accelerate

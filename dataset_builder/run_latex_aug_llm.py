@@ -216,9 +216,9 @@ def load_model(model_name: str):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype          = torch.bfloat16,
+        dtype                = torch.bfloat16,
         device_map           = "cuda",
-        attn_implementation  = "sdpa",   # PyTorch built-in, no extra install needed
+        attn_implementation  = "sdpa",
         trust_remote_code    = True,
     )
     model.eval()
