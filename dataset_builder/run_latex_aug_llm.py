@@ -4,23 +4,18 @@ import json
 import logging
 import random
 import re
+import signal
 import warnings
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import torch
 from datasets import load_dataset
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
 warnings.filterwarnings("ignore")
-
-# CuDNN optimizations for RTX 3090 Ti (sm86, Ampere)
-torch.backends.cudnn.enabled   = True
-torch.backends.cudnn.benchmark = True  # auto-tune kernels for fixed input shapes
-torch.backends.cuda.matmul.allow_tf32 = True  # TF32 for faster matmul on Ampere+
-torch.backends.cudnn.allow_tf32       = True
 
 HF_DATASET = "harryrobert/latex-raw"
 OUT_DIR    = Path("/workspace/output")
@@ -33,7 +28,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("latex_aug")
 
-for _noisy in ("httpx", "httpcore", "huggingface_hub", "filelock", "transformers", "accelerate"):
+for _noisy in ("httpx", "httpcore", "huggingface_hub", "filelock", "transformers", "accelerate", "vllm"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 _SYSTEM_PROMPT = (
@@ -194,79 +189,38 @@ def is_valid_output(original: str, output: str) -> bool:
     return True
 
 
-def log_gpu_memory():
-    for i in range(torch.cuda.device_count()):
-        used  = torch.cuda.memory_allocated(i) / 1e9
-        total = torch.cuda.get_device_properties(i).total_memory / 1e9
-        log.info(f"  GPU {i}: {used:.2f} / {total:.2f} GB")
-
-
-def build_messages(latex: str, transform: str) -> list[dict]:
-    return [
+def build_prompt(latex: str, transform: str, tokenizer) -> str:
+    messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user",   "content": _TRANSFORM_TEMPLATES[transform].replace("{latex}", latex)},
     ]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def load_model(model_name: str):
-    log.info(f"Loading {model_name}  |  transformers  |  bfloat16 + FA2")
+def load_model(model_name: str, gpu_memory_utilization: float):
+    log.info(f"Loading {model_name}  |  vLLM  |  gpu_util={gpu_memory_utilization}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype                = torch.bfloat16,
-        device_map           = "cuda",
-        attn_implementation  = "sdpa",
-        trust_remote_code    = True,
+    llm = LLM(
+        model                  = model_name,
+        dtype                  = "bfloat16",
+        gpu_memory_utilization = gpu_memory_utilization,
+        trust_remote_code      = True,
+        max_model_len          = 640,
+        disable_log_stats      = True,
     )
-    model.eval()
     log.info("Model ready ✓")
-    log_gpu_memory()
-    return model, tokenizer
+    return llm, tokenizer
 
 
-def flush_batch(batch: list[dict], model, tokenizer, args, writer, ckpt, stats, pbar, batch_no_ref):
-    prompts = [
-        tokenizer.apply_chat_template(
-            build_messages(r["latex"], r["transform"]),
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for r in batch
-    ]
+def flush_batch(batch: list[dict], llm, tokenizer, sampling_params, writer, ckpt, stats, pbar, batch_no_ref, ckpt_every):
+    prompts = [build_prompt(r["latex"], r["transform"], tokenizer) for r in batch]
+    outputs = llm.generate(prompts, sampling_params)
 
-    # Sort by prompt length — minimizes padding within batch (dynamic padding)
-    order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
-    batch_sorted   = [batch[i]   for i in order]
-    prompts_sorted = [prompts[i] for i in order]
-
-    inputs = tokenizer(
-        prompts_sorted,
-        return_tensors = "pt",
-        padding        = True,
-        truncation     = True,
-        max_length     = 512,
-    ).to("cuda")
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens     = args.max_new_tokens,
-            do_sample          = True,
-            temperature        = 0.7,
-            top_p              = 0.8,
-            top_k              = 20,
-            repetition_penalty = 1.1,
-            pad_token_id       = tokenizer.pad_token_id,
-        )
-
-    # Each sequence has different input length due to left-padding
-    input_lens = inputs["attention_mask"].sum(dim=1).tolist()
-    for r, out_ids, inp_len in zip(batch_sorted, outputs, input_lens):
-        text = tokenizer.decode(out_ids[int(inp_len):], skip_special_tokens=True)
-        text = clean_output(text)
+    for r, out in zip(batch, outputs):
+        text = clean_output(out.outputs[0].text)
         idx  = str(r["idx"])
         if is_valid_output(r["latex"], text):
             writer.write({"idx": r["idx"], "latex": text, "source": r["source"]})
@@ -281,22 +235,23 @@ def flush_batch(batch: list[dict], model, tokenizer, args, writer, ckpt, stats, 
     pbar.update(len(batch))
     pbar.set_postfix(ok=stats["success"], fail=stats["failed"])
     batch_no_ref[0] += 1
-    if batch_no_ref[0] % args.ckpt_every == 0:
+    if batch_no_ref[0] % ckpt_every == 0:
         ckpt.save()
 
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",          type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
-    ap.add_argument("--hf_dataset",     type=str,   default=HF_DATASET)
-    ap.add_argument("--hf_token",       type=str,   default=None)
-    ap.add_argument("--out_dir",        type=str,   default=str(OUT_DIR))
-    ap.add_argument("--n_samples",      type=int,   default=1_400_000)
-    ap.add_argument("--batch_size",     type=int,   default=256)  # RTX 3090 Ti 24GB, model ~3GB
-    ap.add_argument("--max_new_tokens", type=int,   default=128)
-    ap.add_argument("--shard_size",     type=int,   default=5_000)
-    ap.add_argument("--ckpt_every",     type=int,   default=10)
-    ap.add_argument("--seed",           type=int,   default=SEED)
+    ap.add_argument("--model",                  type=str,   default="Qwen/Qwen2.5-Math-1.5B-Instruct")
+    ap.add_argument("--hf_dataset",             type=str,   default=HF_DATASET)
+    ap.add_argument("--hf_token",               type=str,   default=None)
+    ap.add_argument("--out_dir",                type=str,   default=str(OUT_DIR))
+    ap.add_argument("--n_samples",              type=int,   default=1_400_000)
+    ap.add_argument("--batch_size",             type=int,   default=512)
+    ap.add_argument("--max_new_tokens",         type=int,   default=128)
+    ap.add_argument("--shard_size",             type=int,   default=5_000)
+    ap.add_argument("--ckpt_every",             type=int,   default=10)
+    ap.add_argument("--seed",                   type=int,   default=SEED)
+    ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     return ap.parse_args()
 
 
@@ -311,12 +266,20 @@ def main():
     log.addHandler(fh)
 
     log.info("=" * 60)
-    log.info(f"  LaTeX Augmentation  |  transformers  |  {args.model}")
+    log.info(f"  LaTeX Augmentation  |  vLLM  |  {args.model}")
     log.info("=" * 60)
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
-    model, tokenizer = load_model(args.model)
+    llm, tokenizer = load_model(args.model, args.gpu_memory_utilization)
+
+    sampling_params = SamplingParams(
+        temperature        = 0.7,
+        top_p              = 0.8,
+        top_k              = 20,
+        repetition_penalty = 1.1,
+        max_tokens         = args.max_new_tokens,
+    )
 
     stats      = {"success": 0, "failed": 0, "skipped": 0}
     total_seen = 0
@@ -324,9 +287,8 @@ def main():
     batch: list[dict] = []
     stop = [False]
 
-    import signal
     def _handler(*_):
-        log.warning("Interrupt received — finishing current batch then saving...")
+        log.warning("Interrupt — finishing current batch then saving...")
         stop[0] = True
     signal.signal(signal.SIGINT,  _handler)
     signal.signal(signal.SIGTERM, _handler)
@@ -347,13 +309,12 @@ def main():
         batch.append(record)
 
         if len(batch) >= args.batch_size:
-            flush_batch(batch, model, tokenizer, args, writer, ckpt, stats, pbar, batch_no)
+            flush_batch(batch, llm, tokenizer, sampling_params, writer, ckpt, stats, pbar, batch_no, args.ckpt_every)
             batch.clear()
             gc.collect()
-            torch.cuda.empty_cache()
 
     if batch:
-        flush_batch(batch, model, tokenizer, args, writer, ckpt, stats, pbar, batch_no)
+        flush_batch(batch, llm, tokenizer, sampling_params, writer, ckpt, stats, pbar, batch_no, args.ckpt_every)
         batch.clear()
 
     pbar.close()
