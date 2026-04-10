@@ -164,7 +164,7 @@ class ShardWriter:
 
 def iter_hf_dataset(hf_dataset: str, hf_token: str | None = None):
     log.info(f"Loading dataset from HuggingFace: {hf_dataset}")
-    ds = load_dataset(hf_dataset, split="train", token=hf_token)
+    ds = load_dataset(hf_dataset, split="raw_train", token=hf_token)
     for row in ds:
         lat = row.get("latex")
         if lat and is_augmentable(lat):
