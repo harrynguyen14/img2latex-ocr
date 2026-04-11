@@ -268,6 +268,28 @@ def flush_batch(batch: list[dict], llm, tokenizer, sampling_params, writer, ckpt
         ckpt.save()
 
 
+def flush_pending_bucket(
+    pending: list[dict],
+    args,
+    llm,
+    tokenizer,
+    sampling_params,
+    writer,
+    ckpt,
+    stats,
+    pbar,
+    batch_no,
+):
+    if not pending:
+        return
+    pending.sort(key=lambda row: len(row["latex"]))
+    while pending and stats["success"] < args.n_samples:
+        batch = pending[:args.batch_size]
+        del pending[:args.batch_size]
+        flush_batch(batch, llm, tokenizer, sampling_params, writer, ckpt, stats, pbar, batch_no, args.ckpt_every)
+        gc.collect()
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model",                  type=str,   default="deepseek-ai/deepseek-math-7b-instruct")
@@ -278,7 +300,9 @@ def parse_args():
                     help="Target number of successful heavy samples (0 = raw_n // 2)")
     ap.add_argument("--batch_size",             type=int,   default=64,
                     help="Default tuned for 1x RTX 3090 24GB on Vast.ai")
-    ap.add_argument("--max_new_tokens",         type=int,   default=128)
+    ap.add_argument("--bucket_size",            type=int,   default=4096,
+                    help="Sort by latex length within each bucket before batching")
+    ap.add_argument("--max_new_tokens",         type=int,   default=96)
     ap.add_argument("--max_model_len",          type=int,   default=768)
     ap.add_argument("--shard_size",             type=int,   default=5_000)
     ap.add_argument("--ckpt_every",             type=int,   default=10)
