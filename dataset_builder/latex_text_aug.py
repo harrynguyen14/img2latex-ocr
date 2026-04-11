@@ -1,34 +1,6 @@
-r"""
-latex_text_aug.py
------------------
-Text-level LaTeX augmentation (Group 1 + Group 2).
-
-Group 1 — Regex/string (fast, no parsing):
-  - display mode switching
-  - bracket size variation
-  - whitespace noise
-  - redundant braces
-  - \frac ↔ \over
-  - symbol equivalences
-
-Group 2 — AST via sympy + latex2sympy2 (semantic):
-  - variable renaming
-  - environment switching
-  - commutativity (simple additive terms)
-
-Usage (as module):
-    from latex_text_aug import augment_latex
-    new_latex = augment_latex(latex_string, level="light")  # or "heavy"
-
-Usage (standalone test):
-    python latex_text_aug.py
-"""
-
 import random
 import re
-from typing import Optional
 
-# ── Optional imports (Group 2) ────────────────────────────────────────────────
 try:
     from sympy import latex as sympy_latex
     from sympy.parsing.latex import parse_latex as sympy_parse
@@ -42,479 +14,395 @@ try:
 except ImportError:
     L2S_OK = False
 
+_SHORT_THRESH = 40
+_LONG_THRESH  = 150
 
-# ══════════════════════════════════════════════════════════════════════════════
-# GROUP 1 — Regex / String
-# ══════════════════════════════════════════════════════════════════════════════
+_LATEX_SPACES = [r"\,", r"\!", r"\;", r"\quad", r"\ "]
 
-# ── Display mode switching ────────────────────────────────────────────────────
-
-_DISPLAY_FORMS = [
-    r"\[ {content} \]",
-    r"\begin{{equation}} {content} \end{{equation}}",
-    r"\begin{{equation*}} {content} \end{{equation*}}",
+_GREEK_PAIRS = [
+    (r"\epsilon",  r"\varepsilon"),
+    (r"\phi",      r"\varphi"),
+    (r"\theta",    r"\vartheta"),
+    (r"\rho",      r"\varrho"),
 ]
 
-def toggle_display_mode(latex: str, p: float = 0.3) -> str:
-    r"""$...$ ↔ \[...\] ↔ \begin{equation}...\end{equation}"""
+_ALIAS_PAIRS = [
+    (r"\leq",        r"\le"),
+    (r"\geq",        r"\ge"),
+    (r"\rightarrow", r"\to"),
+    (r"\leftarrow",  r"\gets"),
+    (r"\neq",        r"\ne"),
+]
+
+_FRAC_RE       = re.compile(r"\\frac\{([^{}]+)\}\{([^{}]+)\}")
+_OVER_RE       = re.compile(r"\{([^{}]+)\\over\s*([^{}]+)\}")
+_LEFT_RIGHT_RE = re.compile(r"\\left\s*([(\[{])(.*?)\\right\s*([)\]}])", re.DOTALL)
+
+
+def _make_cmd_pattern(cmd: str) -> str:
+    return re.escape(cmd) + r"(?![a-zA-Z])"
+
+
+def whitespace_noise(latex: str, p: float = 0.8) -> str:
     if random.random() > p:
         return latex
-    # strip existing wrappers
-    stripped = latex.strip()
-    for pat in [
-        r"^\\\[(.+?)\\\]$",
-        r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$",
-        r"^\$(.+?)\$$",
-    ]:
-        m = re.match(pat, stripped, re.DOTALL)
-        if m:
-            content = m.group(1).strip()
-            fmt = random.choice(_DISPLAY_FORMS)
-            return fmt.format(content=content)
-    return latex
-
-
-# ── Bracket size variation ────────────────────────────────────────────────────
-
-_BRACKET_SIZES = ["", r"\big", r"\Big", r"\bigg", r"\Bigg"]
-_BRACKET_PAIRS = [("(", ")"), ("[", "]"), (r"\{", r"\}")]
-
-_LEFT_RIGHT_RE = re.compile(
-    r"\\left\s*([(\[{|])(.*?)\\right\s*([)\]|}])", re.DOTALL
-)
-
-def vary_bracket_size(latex: str, p: float = 0.3) -> str:
-    if random.random() > p:
-        return latex
-
-    # \left( ... \right) → \big( ... \big) etc.
-    def replace_bracket(m):
-        open_b  = m.group(1)
-        content = m.group(2)
-        close_b = m.group(3)
-        size = random.choice(_BRACKET_SIZES)
-        if size == "":
-            return f"{open_b}{content}{close_b}"
-        return f"{size}l{open_b}{content}{size}r{close_b}"
-
-    return _LEFT_RIGHT_RE.sub(replace_bracket, latex)
-
-
-def add_left_right(latex: str, p: float = 0.2) -> str:
-    r"""Bọc ( ) đơn thuần bằng \left \right"""
-    if random.random() > p:
-        return latex
-    return re.sub(r"(?<!\\)\((.{1,30}?)\)", r"\\left(\1\\right)", latex)
-
-
-# ── Whitespace noise ──────────────────────────────────────────────────────────
-
-def whitespace_noise(latex: str, p: float = 0.3) -> str:
-    """Thêm/bớt spaces vô nghĩa xung quanh operators."""
-    if random.random() > p:
-        return latex
-    ops = ["+", "-", "=", "<", ">"]
     result = latex
-    for op in ops:
-        if random.random() < 0.4:
-            spaces = " " * random.randint(0, 2)
-            result = result.replace(op, f"{spaces}{op}{spaces}")
-    # collapse multiple spaces
-    result = re.sub(r" {3,}", "  ", result)
+    candidates = [op for op in ["+", "-", "=", "<", ">"] if op in result]
+    if candidates:
+        picked_ops = random.sample(candidates, k=min(len(candidates), random.choice([1, 1, 2])))
+        for op in picked_ops:
+            spaces = " " * random.randint(0, 1)
+            result = result.replace(op, f"{spaces}{op}{spaces}", 1)
+    if random.random() < 0.35:
+        sp = random.choice(_LATEX_SPACES)
+        result = re.sub(
+            r"(\\(?:frac|sum|int|prod|lim|sqrt))",
+            lambda m: sp + m.group(1),
+            result,
+            count=1,
+        )
+    result = re.sub(r" {2,}", " ", result)
     return result
 
 
-# ── Redundant braces ──────────────────────────────────────────────────────────
-
-def add_redundant_braces(latex: str, p: float = 0.25) -> str:
-    """{a}+{b} style — bọc single char/digit bằng {}"""
+def subscript_brace_noise(latex: str, p: float = 0.7) -> str:
     if random.random() > p:
         return latex
+    bare = list(re.finditer(r"([_^])([a-zA-Z0-9])(?![^{]*\})", latex))
+    braced = list(re.finditer(r"([_^])\{([a-zA-Z0-9])\}", latex))
+    if bare and (not braced or random.random() < 0.5):
+        m = random.choice(bare)
+        return latex[:m.start()] + f"{m.group(1)}{{{m.group(2)}}}" + latex[m.end():]
+    if braced:
+        m = random.choice(braced)
+        return latex[:m.start()] + f"{m.group(1)}{m.group(2)}" + latex[m.end():]
+    return latex
 
-    def wrap_char(m):
-        if random.random() < 0.4:
-            return "{" + m.group(0) + "}"
-        return m.group(0)
 
-    # chỉ wrap char đơn không phải trong command
-    return re.sub(r"(?<!\\)(?<!\{)([a-zA-Z0-9])(?!\})", wrap_char, latex)
-
-
-def add_double_braces(latex: str, p: float = 0.15) -> str:
-    """{{expr}} thay vì {expr} ở một số vị trí"""
+def command_alias(latex: str, p: float = 0.6) -> str:
     if random.random() > p:
         return latex
-    return re.sub(r"\{([^{}]{1,10})\}", lambda m: "{{" + m.group(1) + "}}" if random.random() < 0.3 else m.group(0), latex)
+    result = latex
+    for a, b in _ALIAS_PAIRS:
+        if random.random() < 0.5:
+            pat_a = _make_cmd_pattern(a)
+            pat_b = _make_cmd_pattern(b)
+            if re.search(pat_a, result):
+                result = re.sub(pat_a, lambda _, repl=b: repl, result)
+            elif re.search(pat_b, result):
+                result = re.sub(pat_b, lambda _, repl=a: repl, result)
+    return result
 
 
-# ── \frac ↔ \over ────────────────────────────────────────────────────────────
+def greek_variant(latex: str, p: float = 0.7) -> str:
+    if random.random() > p:
+        return latex
+    result = latex
+    for std, var in _GREEK_PAIRS:
+        if random.random() < 0.5:
+            pat_std = _make_cmd_pattern(std)
+            pat_var = _make_cmd_pattern(var)
+            if re.search(pat_std, result):
+                result = re.sub(pat_std, lambda _, repl=var: repl, result)
+            elif re.search(pat_var, result):
+                result = re.sub(pat_var, lambda _, repl=std: repl, result)
+    return result
 
-_FRAC_RE = re.compile(r"\\frac\{([^{}]+)\}\{([^{}]+)\}")
 
-def frac_to_over(latex: str, p: float = 0.2) -> str:
+def frac_to_over(latex: str, p: float = 0.6) -> str:
     if random.random() > p:
         return latex
     return _FRAC_RE.sub(lambda m: "{" + m.group(1) + r" \over " + m.group(2) + "}", latex)
 
 
-_OVER_RE = re.compile(r"\{([^{}]+)\\over\s*([^{}]+)\}")
-
-def over_to_frac(latex: str, p: float = 0.2) -> str:
+def over_to_frac(latex: str, p: float = 0.6) -> str:
     if random.random() > p:
         return latex
     return _OVER_RE.sub(lambda m: r"\frac{" + m.group(1).strip() + "}{" + m.group(2).strip() + "}", latex)
 
 
-# ── Symbol equivalences ───────────────────────────────────────────────────────
-
-_SYMBOL_MAP = [
-    # multiplication
-    (r"\\cdot",  [r"\\times", r"\\cdot", r"\*"]),
-    (r"\\times", [r"\\times", r"\\cdot"]),
-    # comparison
-    (r"\\leq",   [r"\\leq", r"\\le"]),
-    (r"\\le\b",  [r"\\leq", r"\\le"]),
-    (r"\\geq",   [r"\\geq", r"\\ge"]),
-    (r"\\ge\b",  [r"\\geq", r"\\ge"]),
-    (r"\\neq",   [r"\\neq", r"\\ne", r"\\not="]),
-    # bold
-    (r"\\mathbf\{([^}]+)\}", None),   # handled separately
-    (r"\\boldsymbol\{([^}]+)\}", None),
-    # text
-    (r"\\text\{([^}]+)\}",    None),
-    (r"\\mathrm\{([^}]+)\}",  None),
-    # displaystyle
-    (r"\\displaystyle\s*", [r"\\displaystyle ", ""]),
-    # subset/superset
-    (r"\\subset",  [r"\\subset", r"\\subseteq"]),
-    (r"\\supset",  [r"\\supset", r"\\supseteq"]),
-    # arrows
-    (r"\\to\b",      [r"\\to", r"\\rightarrow"]),
-    (r"\\rightarrow",[r"\\to", r"\\rightarrow"]),
-    (r"\\gets\b",    [r"\\gets", r"\\leftarrow"]),
-    (r"\\leftarrow", [r"\\gets", r"\\leftarrow"]),
-]
-
-
-def symbol_equiv(latex: str, p: float = 0.3) -> str:
+def vary_bracket_size(latex: str, p: float = 0.6) -> str:
+    _SIZES = ["", r"\big", r"\Big", r"\bigg", r"\Bigg"]
+    _ESCAPE = {"{": r"\{", "}": r"\}"}
     if random.random() > p:
         return latex
-    result = latex
-    for pattern, alts in _SYMBOL_MAP:
-        if alts is None:
-            continue
-        if re.search(pattern, result):
-            if random.random() < 0.4:
-                replacement = random.choice(alts)
-                result = re.sub(pattern, replacement, result, count=1)
-
-    # mathbf ↔ boldsymbol
-    if random.random() < 0.3:
-        result = re.sub(r"\\mathbf\{([^}]+)\}", r"\\boldsymbol{\1}", result)
-    elif random.random() < 0.3:
-        result = re.sub(r"\\boldsymbol\{([^}]+)\}", r"\\mathbf{\1}", result)
-
-    # text ↔ mathrm
-    if random.random() < 0.3:
-        result = re.sub(r"\\text\{([^}]+)\}", r"\\mathrm{\1}", result)
-    elif random.random() < 0.3:
-        result = re.sub(r"\\mathrm\{([^}]+)\}", r"\\text{\1}", result)
-
-    return result
+    def repl(m):
+        l, content, r = m.groups()
+        if len(content.strip()) < 8:
+            return m.group(0)
+        size = random.choice(_SIZES)
+        l_esc = _ESCAPE.get(l, l)
+        r_esc = _ESCAPE.get(r, r)
+        if size == "":
+            return f"{l_esc}{content}{r_esc}"
+        return f"{size}l{l_esc}{content}{size}r{r_esc}"
+    return _LEFT_RIGHT_RE.sub(repl, latex)
 
 
-# ── Subscript braces noise ────────────────────────────────────────────────────
-
-def subscript_brace_noise(latex: str, p: float = 0.2) -> str:
-    """x_i ↔ x_{i} (single char subscript/superscript)"""
+def add_left_right(latex: str, p: float = 0.6) -> str:
     if random.random() > p:
         return latex
-    # x_i → x_{i}
-    if random.random() < 0.5:
-        return re.sub(r"([_^])([a-zA-Z0-9])(?!\})", r"\1{\2}", latex)
-    # x_{i} → x_i
-    return re.sub(r"([_^])\{([a-zA-Z0-9])\}", r"\1\2", latex)
+    return re.sub(
+        r"(?<!\\left)(?<!\\bigl)(?<!\\Bigl)(?<!\\)\(([^()]{1,40})\)(?!\\right)",
+        r"\\left(\1\\right)",
+        latex,
+    )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# GROUP 2 — AST-based (pylatexenc + sympy)
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Variable renaming ─────────────────────────────────────────────────────────
-
-_LATIN_VARS   = list("abcdefghijklmnopqrstuvwxyz")
-_GREEK_VARS   = [r"\alpha", r"\beta", r"\gamma", r"\delta", r"\epsilon",
-                 r"\zeta", r"\eta", r"\theta", r"\lambda", r"\mu",
-                 r"\nu", r"\xi", r"\rho", r"\sigma", r"\tau",
-                 r"\phi", r"\psi", r"\omega"]
-_INDEXED_VARS = [f"x_{i}" for i in range(1, 6)] + \
-                [f"a_{{n}}", f"b_{{k}}", f"c_{{m}}"]
-
-_ALL_VARS = _LATIN_VARS + _GREEK_VARS + _INDEXED_VARS
-
-
-def rename_variables(latex: str, p: float = 0.25) -> str:
-    """Thay thế 1-2 biến đơn lẻ bằng biến khác."""
+def tiny_space_tweak(latex: str, p: float = 0.95) -> str:
     if random.random() > p:
         return latex
+    candidates = [r"\frac", r"\sum", r"\int", r"\prod", r"\lim", r"\sqrt",
+                  r"\partial", r"\nabla", r"\infty", r"\cdot", r"\times"]
+    targets = [c for c in candidates if c in latex]
+    if targets:
+        sp = random.choice(_LATEX_SPACES)
+        t = random.choice(targets)
+        return latex.replace(t, sp + t, 1)
+    return latex
 
-    # Tìm các biến đơn lẻ (chữ cái không nằm trong command)
-    single_vars = re.findall(r"(?<!\\)\b([a-z])\b", latex)
-    if not single_vars:
+
+def redundant_braces(latex: str, p: float = 0.6) -> str:
+    if random.random() > p:
         return latex
-
-    unique_vars = list(set(single_vars))
-    n_replace   = random.randint(1, min(2, len(unique_vars)))
-    to_replace  = random.sample(unique_vars, n_replace)
-
-    result = latex
-    for var in to_replace:
-        new_var = random.choice(_ALL_VARS)
-        if new_var == var:
-            continue
-        # chỉ replace word boundary để tránh replace trong command
-        # dùng lambda để tránh re interpret backslash trong new_var (vd \alpha)
-        result = re.sub(rf"(?<!\\)\b{var}\b", lambda _, r=new_var: r, result)
-
-    return result
+    return subscript_brace_noise(latex, p=1.0)
 
 
-# ── Environment switching ─────────────────────────────────────────────────────
-
-_ENV_EQUIV = {
-    "equation":  ["equation", "equation*"],
-    "equation*": ["equation", "equation*"],
-    "align":     ["align", "align*", "gather", "gather*"],
-    "align*":    ["align", "align*", "gather", "gather*"],
-    "gather":    ["align", "align*", "gather", "gather*"],
-    "gather*":   ["align", "align*", "gather", "gather*"],
+_LIGHT_FAMILIES = {
+    "spacing": [whitespace_noise, tiny_space_tweak],
+    "subsup_braces": [subscript_brace_noise, redundant_braces],
+    "command_alias": [command_alias],
+    "greek_variant": [greek_variant],
+    "frac_style": [frac_to_over, over_to_frac],
+    "delimiter_style": [add_left_right, vary_bracket_size],
 }
 
-_ENV_RE = re.compile(r"\\begin\{(\w+\*?)\}(.*?)\\end\{\1\}", re.DOTALL)
+_LIGHT_STYLE_PLANS = {
+    0: ("spacing", "subsup_braces", "delimiter_style", "command_alias"),
+    1: ("spacing", "subsup_braces", "frac_style", "command_alias", "greek_variant"),
+}
+
+_FALLBACK_FNS = [tiny_space_tweak, whitespace_noise, subscript_brace_noise, redundant_braces]
 
 
-def switch_environment(latex: str, p: float = 0.2) -> str:
-    if random.random() > p:
-        return latex
-
-    def replace_env(m):
-        env     = m.group(1)
-        content = m.group(2)
-        alts    = _ENV_EQUIV.get(env)
-        if not alts:
-            return m.group(0)
-        new_env = random.choice(alts)
-        return f"\\begin{{{new_env}}}{content}\\end{{{new_env}}}"
-
-    return _ENV_RE.sub(replace_env, latex)
+def _pick_num_light_families(latex: str) -> int:
+    n = len(latex)
+    if n < _SHORT_THRESH:
+        return 1
+    if n < _LONG_THRESH:
+        return 1 if random.random() < 0.65 else 2
+    if random.random() < 0.80:
+        return 2
+    return 1
 
 
-# ── Commutativity (simple) ────────────────────────────────────────────────────
-
-def commute_addition(latex: str, p: float = 0.2) -> str:
-    """Đảo thứ tự các terms trong phép cộng đơn giản: a+b → b+a"""
-    if random.random() > p:
-        return latex
-
-    # Chỉ xử lý pattern đơn giản: token + token
-    # token = chữ cái/số/command đơn giản
-    _TOKEN = r"(?:\\[a-zA-Z]+(?:\{[^{}]*\})*|[a-zA-Z0-9]+)"
-    pattern = rf"({_TOKEN})\s*\+\s*({_TOKEN})"
-
-    def swap(m):
-        if random.random() < 0.5:
-            return f"{m.group(2)} + {m.group(1)}"
-        return m.group(0)
-
-    return re.sub(pattern, swap, latex)
+def _ordered_family_names(aug_id: int | None) -> list[str]:
+    if aug_id in _LIGHT_STYLE_PLANS:
+        preferred = list(_LIGHT_STYLE_PLANS[aug_id])
+        remaining = [name for name in _LIGHT_FAMILIES if name not in preferred]
+        return preferred + remaining
+    names = list(_LIGHT_FAMILIES)
+    random.shuffle(names)
+    return names
 
 
-def commute_multiplication(latex: str, p: float = 0.15) -> str:
-    r"""a \cdot b → b \cdot a"""
-    if random.random() > p:
-        return latex
-
-    _TOKEN = r"(?:\\[a-zA-Z]+(?:\{[^{}]*\})*|[a-zA-Z0-9]+)"
-    pattern = rf"({_TOKEN})\s*\\cdot\s*({_TOKEN})"
-
-    def swap(m):
-        if random.random() < 0.5:
-            return f"{m.group(2)} \\cdot {m.group(1)}"
-        return m.group(0)
-
-    return re.sub(pattern, swap, latex)
+def _apply_light_family(latex: str, family_name: str) -> str:
+    result = latex
+    for fn in _LIGHT_FAMILIES[family_name]:
+        new = fn(result, p=1.0)
+        if new != result and new.strip():
+            return new
+    return latex
 
 
-# ── Sympy-based roundtrip (nếu có thư viện) ──────────────────────────────────
+def _apply_spacing_style(latex: str, aug_id: int | None) -> str:
+    if aug_id == 0:
+        return whitespace_noise(latex, p=1.0)
 
-def sympy_roundtrip(latex: str, p: float = 0.15) -> str:
-    """Parse LaTeX → SymPy → back to LaTeX (normalize + vary formatting)"""
-    if not SYMPY_OK or random.random() > p:
-        return latex
-    try:
-        expr   = sympy_parse(latex)
-        result = sympy_latex(expr)
-        return result if result.strip() else latex
-    except Exception:
-        return latex
+    command_targets = [c for c in [r"\frac", r"\sum", r"\int", r"\prod", r"\lim", r"\sqrt"] if c in latex]
+    if command_targets:
+        sp = random.choice(_LATEX_SPACES)
+        target = random.choice(command_targets)
+        return latex.replace(target, sp + target, 1)
+    return tiny_space_tweak(latex, p=1.0)
 
 
-def l2s_roundtrip(latex: str, p: float = 0.15) -> str:
-    """latex2sympy2 roundtrip"""
-    if not L2S_OK or random.random() > p:
-        return latex
-    try:
-        expr   = latex2sympy(latex)
-        result = sympy_latex(expr)
-        return result if result.strip() else latex
-    except Exception:
-        return latex
+def _apply_aug_id_specific_family(latex: str, aug_id: int | None) -> str:
+    if aug_id == 0:
+        for family_name in ("subsup_braces", "delimiter_style", "command_alias"):
+            if _should_apply_family(latex, family_name, aug_id):
+                new = _apply_light_family(latex, family_name)
+                if new != latex and new.strip():
+                    return new
+    elif aug_id == 1:
+        for family_name in ("frac_style", "command_alias", "greek_variant", "delimiter_style"):
+            if _should_apply_family(latex, family_name, aug_id):
+                new = _apply_light_family(latex, family_name)
+                if new != latex and new.strip():
+                    return new
+    return latex
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Combined pipelines
-# ══════════════════════════════════════════════════════════════════════════════
-
-_LIGHT_FNS = [
-    whitespace_noise,
-    subscript_brace_noise,
-    symbol_equiv,
-    over_to_frac,
-    frac_to_over,
-]
-
-_HEAVY_FNS = [
-    whitespace_noise,
-    subscript_brace_noise,
-    symbol_equiv,
-    over_to_frac,
-    frac_to_over,
-    add_redundant_braces,
-    add_double_braces,
-    vary_bracket_size,
-    add_left_right,
-    toggle_display_mode,
-    rename_variables,
-    switch_environment,
-    commute_addition,
-    commute_multiplication,
-    sympy_roundtrip,
-]
+def _should_apply_family(latex: str, family_name: str, aug_id: int | None) -> bool:
+    if family_name == "spacing":
+        return True
+    if family_name == "subsup_braces":
+        return bool(re.search(r"[_^](?:\{|[A-Za-z0-9])", latex))
+    if family_name == "delimiter_style":
+        return "(" in latex and ")" in latex
+    if family_name == "frac_style":
+        return r"\frac" in latex or r"\over" in latex
+    if family_name == "command_alias":
+        return any(a in latex or b in latex for a, b in _ALIAS_PAIRS)
+    if family_name == "greek_variant":
+        return aug_id == 1 and any(std in latex or var in latex for std, var in _GREEK_PAIRS)
+    return True
 
 
-def augment_latex(latex: str, level: str = "light") -> str:
-    """
-    Apply random text-level aug lên LaTeX string.
-    level: "light" | "heavy"
-    """
+def augment_latex(latex: str, level: str = "light", aug_id: int | None = None) -> str:
     if not latex or not latex.strip():
         return latex
 
-    fns = _LIGHT_FNS if level == "light" else _HEAVY_FNS
+    if level != "light":
+        raise ValueError(f"Unsupported augmentation level: {level}")
+
     result = latex
+    changed = False
+    chosen_families = []
+    family_names = _ordered_family_names(aug_id)
+    n_families = min(_pick_num_light_families(latex), len(family_names))
 
-    # shuffle để không luôn apply cùng thứ tự
-    for fn in random.sample(fns, len(fns)):
-        result = fn(result)
-        if not result.strip():
-            return latex  # fallback nếu aug làm rỗng string
+    # Keep light aug close to raw: spacing is the anchor, then add at most one targeted family.
+    for family_name in family_names:
+        if len(chosen_families) >= n_families:
+            break
+        if not _should_apply_family(latex, family_name, aug_id):
+            continue
+        if family_name == "spacing":
+            chosen_families.append(family_name)
+            continue
+        if random.random() < 0.45:
+            chosen_families.append(family_name)
 
+    if not chosen_families:
+        chosen_families = [family_names[0]]
+
+    if "spacing" not in chosen_families and n_families > 1:
+        chosen_families = ["spacing"] + chosen_families[: n_families - 1]
+    else:
+        chosen_families = chosen_families[:n_families]
+
+    # Encourage aug_id=0 and aug_id=1 to differ in style without drifting too far from raw.
+    if aug_id in (0, 1):
+        specific = _apply_aug_id_specific_family(latex, aug_id)
+        if specific != latex:
+            result = specific
+            changed = True
+            chosen_families = [name for name in chosen_families if name != "subsup_braces"]
+            if aug_id == 1:
+                chosen_families = [name for name in chosen_families if name != "frac_style"]
+
+    for family_name in chosen_families:
+        if family_name == "spacing":
+            new = _apply_spacing_style(result, aug_id)
+        else:
+            new = _apply_light_family(result, family_name)
+        if new != result and new.strip():
+            result = new
+            changed = True
+
+    if not changed:
+        for fn in _FALLBACK_FNS:
+            new = fn(latex, p=1.0)
+            if new != latex and new.strip():
+                result = new
+                changed = True
+                break
+    if not changed:
+        result = whitespace_noise(latex, p=1.0)
+    if result == latex:
+        sp = random.choice(_LATEX_SPACES)
+        result = sp + latex
     return result
 
 
-# ── Pipeline: read raw_train → aug text → write shards ───────────────────────
-
 def _run_pipeline():
+    import os
     import pyarrow as pa
     import pyarrow.parquet as pq
     from pathlib import Path
     from tqdm import tqdm
 
+    AUG_RATIO = 2
     OUT_DIR   = Path("D:/dataset-ocr-builder/latex-ocr-dataset")
     TRAIN_DIR = OUT_DIR / "train"
-    out_dir   = TRAIN_DIR / "light_text"
+    out_dir   = TRAIN_DIR / "light_text_v5"
     prefix    = "light_text_train"
 
     raw_files = sorted((TRAIN_DIR / "raw").glob("raw_train-*.parquet"))
     if not raw_files:
-        raise FileNotFoundError(f"No raw_train shards in {TRAIN_DIR / 'raw'}. Run run_split.py first.")
+        raise FileNotFoundError("No raw_train shards found.")
 
-    n_shards = len(raw_files)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"\n== {prefix} ({n_shards} shards) ==")
-    print(f"  output -> {out_dir}\n")
-    total = 0
+    n_out_shards = len(raw_files) * AUG_RATIO
+    out_idx = 0
+    devnull = open(os.devnull, "w")
 
     for i, pfile in enumerate(raw_files):
-        table   = pq.read_table(str(pfile))
+        table = pq.read_table(str(pfile))
         latexes = table["latex"].to_pylist()
-        images  = table["image"].to_pylist()
         sources = table["source"].to_pylist()
         idxs    = table["idx"].to_pylist()
-        del table
 
-        aug_latexes = []
-        for lat in tqdm(latexes, desc=f"  shard {i+1}/{n_shards}", ncols=80, leave=False):
-            aug_latexes.append(augment_latex(lat, level="light"))
+        for v in range(AUG_RATIO):
+            random.seed(i * AUG_RATIO + v)
+            aug_latexes = [augment_latex(lat, aug_id=v) for lat in tqdm(latexes, desc=f"Shard {i+1} Aug {v+1}", leave=False, file=devnull)]
+            fname = f"{prefix}-{str(out_idx).zfill(5)}-of-{str(n_out_shards).zfill(5)}.parquet"
+            pq.write_table(
+                pa.table({"idx": idxs, "aug_id": [v] * len(idxs), "latex": aug_latexes, "source": sources}),
+                str(out_dir / fname),
+            )
+            out_idx += 1
 
-        fname = f"{prefix}-{str(i).zfill(5)}-of-{str(n_shards).zfill(5)}.parquet"
-        out_table = pa.table({
-            "idx":    pa.array(idxs,        type=pa.int64()),
-            "image":  pa.array(images,       type=pa.binary()),
-            "latex":  pa.array(aug_latexes,  type=pa.string()),
-            "source": pa.array(sources,      type=pa.string()),
-        })
-        pq.write_table(out_table, str(out_dir / fname), compression="snappy")
-        total += len(aug_latexes)
-        print(f"  shard {i+1}/{n_shards}: {len(aug_latexes):,} rows -> {out_dir.name}/")
-
-        del images, latexes, sources, idxs, aug_latexes, out_table
-
-    print(f"\n  total {prefix}: {total:,}")
+    devnull.close()
 
 
-# ── Standalone test / pipeline runner ────────────────────────────────────────
+def _run_test(num_samples: int | None, output: str | None):
+    import pyarrow.parquet as pq
+    from pathlib import Path
+
+    OUT_DIR   = Path("D:/dataset-ocr-builder/latex-ocr-dataset")
+    TRAIN_DIR = OUT_DIR / "train"
+    raw_files = sorted((TRAIN_DIR / "raw").glob("raw_train-*.parquet"))
+    if not raw_files:
+        raise FileNotFoundError("No raw_train shards found.")
+
+    all_latexes = []
+    for pfile in raw_files:
+        all_latexes.extend(pq.read_table(str(pfile))["latex"].to_pylist())
+
+    samples = all_latexes if num_samples is None else random.sample(all_latexes, min(num_samples, len(all_latexes)))
+
+    results = []
+    for s in samples:
+        out = augment_latex(s)
+        results.append(f"IN : {s}\nOUT: {out}\n")
+
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write("".join(results))
+
 
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="LaTeX text augmentation")
-    ap.add_argument("--run", action="store_true",
-                    help="Run pipeline: raw_train -> light_text/")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", action="store_true")
+    ap.add_argument("--num_samples", type=int, default=None)
+    ap.add_argument("--output", type=str)
     args = ap.parse_args()
 
     if args.run:
         _run_pipeline()
     else:
-        # Standalone test
-        samples = [
-            r"\frac{dy}{dt} = y^2 + x",
-            r"\sum_{i=0}^{n} x_i^2 + a + b",
-            r"\int_0^\infty e^{-x} dx",
-            r"E = mc^2",
-            r"\left( \frac{a+b}{c} \right)^2",
-            r"\begin{align} x &= a + b \\ y &= c + d \end{align}",
-            r"\alpha \cdot \beta + \gamma",
-        ]
-
-        print("=" * 60)
-        print("LIGHT AUG")
-        print("=" * 60)
-        for s in samples:
-            out = augment_latex(s, level="light")
-            print(f"  IN : {s}")
-            print(f"  OUT: {out}")
-            print()
-
-        print("=" * 60)
-        print("HEAVY AUG")
-        print("=" * 60)
-        for s in samples:
-            out = augment_latex(s, level="heavy")
-            print(f"  IN : {s}")
-            print(f"  OUT: {out}")
-            print()
-
-        print(f"sympy  available: {SYMPY_OK}")
-        print(f"latex2sympy2 available: {L2S_OK}")
+        _run_test(num_samples=args.num_samples, output=args.output)
