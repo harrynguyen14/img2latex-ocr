@@ -2,11 +2,22 @@ import argparse
 import gc
 import json
 import logging
+import os
 import random
 import re
 import signal
+import sys
 import warnings
 from pathlib import Path
+
+# Must be set before any CUDA/torch import so vLLM EngineCore subprocess inherits it.
+# Parse --gpu_id early from sys.argv before argparse runs.
+_gpu_id = "0"
+for _i, _a in enumerate(sys.argv):
+    if _a == "--gpu_id" and _i + 1 < len(sys.argv):
+        _gpu_id = sys.argv[_i + 1]
+        break
+os.environ["CUDA_VISIBLE_DEVICES"] = _gpu_id
 
 try:
     from pylatexenc.latexwalker import LatexWalker, LatexWalkerError
@@ -286,8 +297,6 @@ def build_prompt(latex: str, transform: str, tokenizer) -> str:
 
 
 def load_model(model_name: str, gpu_memory_utilization: float, max_model_len: int, gpu_id: int = 0):
-    import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     log.info(f"Loading {model_name}  |  vLLM  |  gpu_util={gpu_memory_utilization}  |  gpu_id={gpu_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left", trust_remote_code=True)
     if tokenizer.pad_token is None:
