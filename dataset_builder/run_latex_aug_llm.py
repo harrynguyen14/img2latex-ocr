@@ -228,12 +228,13 @@ def load_model(model_name: str, gpu_memory_utilization: float, max_model_len: in
 
     llm = LLM(
         model                  = model_name,
-        dtype                  = "float16",
+        dtype                  = "bfloat16",
         gpu_memory_utilization = gpu_memory_utilization,
         trust_remote_code      = True,
         max_model_len          = max_model_len,
         tensor_parallel_size   = 1,
         disable_log_stats      = True,
+        enable_prefix_caching  = True,
     )
     log.info("Model ready ✓")
     return llm, tokenizer
@@ -298,11 +299,11 @@ def parse_args():
     ap.add_argument("--out_dir",                type=str,   default=str(OUT_DIR))
     ap.add_argument("--n_samples",              type=int,   default=0,
                     help="Target number of successful heavy samples (0 = raw_n // 2)")
-    ap.add_argument("--batch_size",             type=int,   default=64,
-                    help="Default tuned for 1x RTX 3090 24GB on Vast.ai")
+    ap.add_argument("--batch_size",             type=int,   default=4096,
+                    help="Large batch — vLLM handles internal scheduling")
     ap.add_argument("--bucket_size",            type=int,   default=4096,
                     help="Sort by latex length within each bucket before batching")
-    ap.add_argument("--max_new_tokens",         type=int,   default=96)
+    ap.add_argument("--max_new_tokens",         type=int,   default=128)
     ap.add_argument("--max_model_len",          type=int,   default=768)
     ap.add_argument("--shard_size",             type=int,   default=5_000)
     ap.add_argument("--ckpt_every",             type=int,   default=10)
