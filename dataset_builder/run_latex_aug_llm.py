@@ -8,6 +8,12 @@ import signal
 import warnings
 from pathlib import Path
 
+try:
+    from pylatexenc.latexwalker import LatexWalker, LatexWalkerError
+    _PYLATEXENC_AVAILABLE = True
+except ImportError:
+    _PYLATEXENC_AVAILABLE = False
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets import load_dataset
@@ -182,6 +188,9 @@ _PROSE_PREFIXES = (
     "to solve", "to add", "to factor", "to expand", "to find",
     "sure,", "let's", "the given", "we need", "we can",
     "first,", "step ", "note that", "therefore", "thus,",
+    "this is", "this equation", "this expression", "in this case",
+    "we rewrite", "we can rewrite", "rewriting", "since ",
+    "because ", "by ", "using ",
 )
 _BAD_EXACT = {"system", "user", "assistant"}
 _ROLE_PREFIX_RE = re.compile(r"^(system|user|assistant)\s*:?", re.IGNORECASE)
@@ -189,6 +198,26 @@ _ROLE_PREFIX_RE = re.compile(r"^(system|user|assistant)\s*:?", re.IGNORECASE)
 _LATEX_SIGNAL_RE = re.compile(
     r"\\[a-zA-Z]|[_^{}]|\d+\s*[+\-*/=<>]\s*\d|\\frac|\\sum|\\int"
 )
+
+# Plain sqrt/frac without backslash — programming style, not LaTeX
+_PLAIN_SQRT_RE  = re.compile(r"(?<!\\)\bsqrt\s*\(")
+_PLAIN_FRAC_RE  = re.compile(r"(?<!\\)\bfrac\s*\{")
+# Markdown artifacts
+_MARKDOWN_RE    = re.compile(r"\\\_|&amp;|&lt;|&gt;")
+# English word density: if >3 consecutive lowercase words → prose
+_WORD_RUN_RE    = re.compile(r"[a-z]{3,}(?:\s+[a-z]{3,}){3,}")
+
+
+def _pylatexenc_ok(text: str) -> bool:
+    """Return False if pylatexenc finds a hard parse error."""
+    if not _PYLATEXENC_AVAILABLE:
+        return True
+    try:
+        w = LatexWalker(text, tolerant_parsing=False)
+        w.get_latex_nodes()[0]
+        return True
+    except LatexWalkerError:
+        return False
 
 
 def is_valid_output(original: str, output: str) -> bool:
@@ -201,13 +230,24 @@ def is_valid_output(original: str, output: str) -> bool:
         return False
     if len(out) > max(len(original) * 4, 512):
         return False
-    # Reject verbose English prose — the model hallucinated an explanation.
     lower = out.lower()
+    # Reject verbose English prose
     if any(lower.startswith(p) for p in _PROSE_PREFIXES):
         return False
-    # Output must contain at least one LaTeX signal (command, subscript, operator…)
-    # unless the original itself is plain text/numbers.
+    # Reject if contains a run of ≥4 plain English words (prose hallucination)
+    if _WORD_RUN_RE.search(out):
+        return False
+    # Output must contain at least one LaTeX signal
     if _LATEX_SIGNAL_RE.search(original) and not _LATEX_SIGNAL_RE.search(out):
+        return False
+    # Reject programming-style sqrt/frac without backslash
+    if _PLAIN_SQRT_RE.search(out) or _PLAIN_FRAC_RE.search(out):
+        return False
+    # Reject markdown/HTML artifacts
+    if _MARKDOWN_RE.search(out):
+        return False
+    # pylatexenc structural validation
+    if not _pylatexenc_ok(out):
         return False
     return True
 
@@ -380,7 +420,7 @@ def main():
             "transform": rng.choice(_TRANSFORMS),
         })
 
-        if len(batch) >= args.batch_size:
+        if len(batch) >= min(args.batch_size, target_success * 2):
             flush_batch(batch, llm, tokenizer, sampling_params, writer, ckpt, stats, pbar, batch_no, args.ckpt_every)
             batch.clear()
             gc.collect()
