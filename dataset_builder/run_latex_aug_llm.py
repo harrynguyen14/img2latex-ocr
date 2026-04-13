@@ -201,7 +201,7 @@ _LATEX_SIGNAL_RE = re.compile(
 
 # Plain sqrt/frac without backslash — programming style, not LaTeX
 _PLAIN_SQRT_RE  = re.compile(r"(?<!\\)\bsqrt\s*\(")
-_PLAIN_FRAC_RE  = re.compile(r"(?<!\\)\bfrac\s*\{")
+_PLAIN_FRAC_RE  = re.compile(r"(?<![\\a-zA-Z])frac\s*\{")
 # Markdown artifacts
 _MARKDOWN_RE    = re.compile(r"\\\_|&amp;|&lt;|&gt;")
 # English word density: if >3 consecutive lowercase words → prose
