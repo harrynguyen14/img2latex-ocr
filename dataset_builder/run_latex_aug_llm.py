@@ -170,16 +170,41 @@ def iter_hf_dataset(hf_dataset: str, hf_token: str | None = None):
             yield {"idx": row["idx"], "latex": lat, "source": row.get("source", "")}
 
 
+_UNICODE_TO_LATEX = {
+    "α": r"\alpha",    "β": r"\beta",     "γ": r"\gamma",    "δ": r"\delta",
+    "ε": r"\epsilon",  "ζ": r"\zeta",     "η": r"\eta",      "θ": r"\theta",
+    "ι": r"\iota",     "κ": r"\kappa",    "λ": r"\lambda",   "μ": r"\mu",
+    "ν": r"\nu",       "ξ": r"\xi",       "π": r"\pi",       "ρ": r"\rho",
+    "σ": r"\sigma",    "τ": r"\tau",      "υ": r"\upsilon",  "φ": r"\phi",
+    "χ": r"\chi",      "ψ": r"\psi",      "ω": r"\omega",
+    "Α": r"\Alpha",    "Β": r"\Beta",     "Γ": r"\Gamma",    "Δ": r"\Delta",
+    "Ε": r"\Epsilon",  "Ζ": r"\Zeta",     "Η": r"\Eta",      "Θ": r"\Theta",
+    "Λ": r"\Lambda",   "Μ": r"\Mu",       "Ξ": r"\Xi",       "Π": r"\Pi",
+    "Σ": r"\Sigma",    "Τ": r"\Tau",      "Υ": r"\Upsilon",  "Φ": r"\Phi",
+    "Χ": r"\Chi",      "Ψ": r"\Psi",      "Ω": r"\Omega",
+    "∞": r"\infty",    "∑": r"\sum",      "∏": r"\prod",     "∫": r"\int",
+    "√": r"\sqrt",     "∂": r"\partial",  "∇": r"\nabla",    "±": r"\pm",
+    "×": r"\times",    "÷": r"\div",      "·": r"\cdot",     "≤": r"\leq",
+    "≥": r"\geq",      "≠": r"\neq",      "≈": r"\approx",   "∈": r"\in",
+    "∉": r"\notin",    "⊂": r"\subset",   "⊃": r"\supset",   "∪": r"\cup",
+    "∩": r"\cap",      "∅": r"\emptyset", "→": r"\to",       "↔": r"\leftrightarrow",
+    "⇒": r"\Rightarrow", "⇔": r"\Leftrightarrow",
+}
+
 def clean_output(raw: str) -> str:
     out = raw.strip()
     out = re.sub(r"^```[^\n]*\n", "", out)
     out = re.sub(r"\n?```$", "", out)
     out = re.sub(r"^\$\$?(.+?)\$\$?$",                                 r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"^\\\((.+?)\\\)$",                                    r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\\[(.+?)\\\]$",                                    r"\1", out, flags=re.DOTALL)
     out = re.sub(r"^\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}$", r"\1", out, flags=re.DOTALL)
     lines = [l.strip() for l in out.splitlines() if l.strip()]
     if lines:
         out = lines[0]
+    # Normalize Unicode math symbols to LaTeX commands
+    for uni, latex in _UNICODE_TO_LATEX.items():
+        out = out.replace(uni, latex)
     return out.strip()
 
 
@@ -260,8 +285,10 @@ def build_prompt(latex: str, transform: str, tokenizer) -> str:
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def load_model(model_name: str, gpu_memory_utilization: float, max_model_len: int):
-    log.info(f"Loading {model_name}  |  vLLM  |  gpu_util={gpu_memory_utilization}")
+def load_model(model_name: str, gpu_memory_utilization: float, max_model_len: int, gpu_id: int = 0):
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    log.info(f"Loading {model_name}  |  vLLM  |  gpu_util={gpu_memory_utilization}  |  gpu_id={gpu_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left", trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -349,6 +376,12 @@ def parse_args():
     ap.add_argument("--ckpt_every",             type=int,   default=10)
     ap.add_argument("--seed",                   type=int,   default=SEED)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.92)
+    ap.add_argument("--gpu_id",     type=int, default=0,
+                    help="CUDA device index to use (0 or 1)")
+    ap.add_argument("--worker_id",  type=int, default=0,
+                    help="Worker index for dataset sharding (0 or 1)")
+    ap.add_argument("--num_workers",type=int, default=1,
+                    help="Total number of parallel workers")
     return ap.parse_args()
 
 
@@ -367,14 +400,21 @@ def main():
     target_success = args.n_samples if args.n_samples > 0 else raw_n // 2
     ds = ds.shuffle(seed=args.seed)
 
+    # Shard dataset across workers — each worker processes a disjoint slice
+    if args.num_workers > 1:
+        ds = ds.shard(num_shards=args.num_workers, index=args.worker_id)
+        shard_n = len(ds)
+        target_success = target_success // args.num_workers
+        log.info(f"  Worker {args.worker_id}/{args.num_workers} | shard_n={shard_n:,} | target={target_success:,}")
+
     log.info("=" * 60)
     log.info(f"  LaTeX Augmentation  |  vLLM  |  {args.model}")
-    log.info(f"  raw_n={raw_n:,}  target_success={target_success:,}")
+    log.info(f"  raw_n={raw_n:,}  target_success={target_success:,}  gpu_id={args.gpu_id}")
     log.info("=" * 60)
 
     ckpt   = Checkpoint(out_dir / "llm_aug_checkpoint.json")
     writer = ShardWriter(out_dir, shard_size=args.shard_size)
-    llm, tokenizer = load_model(args.model, args.gpu_memory_utilization, args.max_model_len)
+    llm, tokenizer = load_model(args.model, args.gpu_memory_utilization, args.max_model_len, args.gpu_id)
 
     sampling_params = SamplingParams(
         temperature        = 0.6,

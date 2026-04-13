@@ -1,5 +1,7 @@
+vllm
 transformers
-datasets
-pyarrow
+datasets==2.21.0
+pyarrow==18.1.0
 tqdm
 accelerate
+pylatexenc
