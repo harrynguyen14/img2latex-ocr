@@ -77,8 +77,18 @@ def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
         model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")), strict=False)
     else:
         model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"), strict=False)
+
     trainer = torch.load(str(ckpt_dir / "trainer.pt"), map_location="cpu")
-    optimizer.load_state_dict(trainer["optimizer"])
+
+    # Move optimizer state tensors to the same device as model params
+    device = next(model.parameters()).device
+    opt_state = trainer["optimizer"]
+    for state in opt_state["state"].values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+    optimizer.load_state_dict(opt_state)
+
     scheduler.load_state_dict(trainer["scheduler"])
     return trainer["step"]
 
