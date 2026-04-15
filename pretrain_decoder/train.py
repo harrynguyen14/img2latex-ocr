@@ -44,7 +44,9 @@ def parse_args():
     ap.add_argument("--raw-weight",      type=float, default=1.0)
     ap.add_argument("--light-weight",    type=float, default=1.0)
     ap.add_argument("--heavy-weight",    type=float, default=1.0)
-    ap.add_argument("--no-resume",       action="store_true")
+    ap.add_argument("--no-resume",        action="store_true")
+    ap.add_argument("--resume-from",      type=str, default=None,
+                    help="Path to specific checkpoint dir to resume from")
     ap.add_argument("--seed",            type=int,   default=42)
 
     return ap.parse_args()
@@ -91,7 +93,8 @@ def main():
         )
 
     print(cfg)
-    train(cfg, resume=not args.no_resume)
+    resume = args.resume_from if args.resume_from else (not args.no_resume)
+    train(cfg, resume=resume)
 
 
 if __name__ == "__main__":

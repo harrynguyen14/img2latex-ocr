@@ -148,10 +148,12 @@ def train(cfg: DecoderConfig, resume: bool = True):
     # Load checkpoint BEFORE torch.compile so optimizer state refs match
     start_step = 0
     if resume:
-        ckpt = find_latest_checkpoint(out_dir)
-        if ckpt:
+        ckpt = Path(resume) if (isinstance(resume, str) and resume) else find_latest_checkpoint(out_dir)
+        if ckpt and Path(ckpt).exists():
             print(f"Resuming from {ckpt}")
-            start_step = load_checkpoint(model, optimizer, scheduler, ckpt)
+            start_step = load_checkpoint(model, optimizer, scheduler, Path(ckpt))
+        else:
+            print("No checkpoint found, starting from scratch")
 
     if cfg.compile:
         print("Compiling model with torch.compile ...")
