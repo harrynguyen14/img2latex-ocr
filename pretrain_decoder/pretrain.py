@@ -229,8 +229,9 @@ def train(cfg: DecoderConfig, resume: bool = True):
                 short = name.replace("val_", "")
                 eval_metrics[f"ppl_{short}"]  = m["val_ppl"]
                 eval_metrics[f"loss_{short}"] = m["val_loss"]
-                avg_val_ppl += m["val_ppl"]
-            avg_val_ppl /= len(val_loaders)
+                if name != "val_heavy":
+                    avg_val_ppl += m["val_ppl"]
+            avg_val_ppl /= 2
 
             if avg_val_ppl < best_val_ppl:
                 best_val_ppl     = avg_val_ppl

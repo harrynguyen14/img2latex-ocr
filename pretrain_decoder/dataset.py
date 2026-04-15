@@ -10,7 +10,7 @@ from tokenizers import Tokenizer
 from config import DecoderConfig
 
 
-def _split_files(path: Path, ratio: float, seed: int, val_files: int = 1) -> tuple[list[Path], list[Path]]:
+def _split_files(path: Path, ratio: float, seed: int, val_files: int = 3) -> tuple[list[Path], list[Path]]:
     files = sorted(path.glob("*.parquet"))
     n_keep = max(1, round(len(files) * ratio))
     sampled = random.Random(seed).sample(files, n_keep)
@@ -75,9 +75,9 @@ class PretrainDataset(IterableDataset):
 
         if self.split == "train":
             weights = {
-                "raw":        self.cfg.raw_ratio,
-                "light_text": self.cfg.light_ratio,
-                "heavy_text": self.cfg.heavy_ratio,
+                "raw":        self.cfg.raw_weight,
+                "light_text": self.cfg.light_weight,
+                "heavy_text": self.cfg.heavy_weight,
             }
             stream = _interleaved_stream(train_pools, weights, rng)
         elif self.split == "val_raw":

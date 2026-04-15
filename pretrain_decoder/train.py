@@ -41,6 +41,9 @@ def parse_args():
     ap.add_argument("--raw-ratio",       type=float, default=0.70)
     ap.add_argument("--light-ratio",     type=float, default=0.70)
     ap.add_argument("--heavy-ratio",     type=float, default=0.30)
+    ap.add_argument("--raw-weight",      type=float, default=1.0)
+    ap.add_argument("--light-weight",    type=float, default=1.0)
+    ap.add_argument("--heavy-weight",    type=float, default=1.0)
     ap.add_argument("--no-resume",       action="store_true")
     ap.add_argument("--seed",            type=int,   default=42)
 
@@ -82,6 +85,9 @@ def main():
             raw_ratio                = args.raw_ratio,
             light_ratio              = args.light_ratio,
             heavy_ratio              = args.heavy_ratio,
+            raw_weight               = args.raw_weight,
+            light_weight             = args.light_weight,
+            heavy_weight             = args.heavy_weight,
         )
 
     print(cfg)

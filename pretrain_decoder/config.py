@@ -39,7 +39,7 @@ class DecoderConfig:
     eval_every_steps:        int   = 1_000
     keep_last_n_ckpt:        int   = 3
     log_every_steps:         int   = 100
-    early_stopping_patience: int   = 5
+    early_stopping_patience: int   = 10
     num_workers:             int   = 2
     compile:                 bool  = False
 
@@ -50,6 +50,10 @@ class DecoderConfig:
     raw_ratio:        float = 0.70
     light_ratio:      float = 0.70
     heavy_ratio:      float = 0.30
+
+    raw_weight:       float = 1.0
+    light_weight:     float = 1.0
+    heavy_weight:     float = 1.0
 
     @property
     def head_dim(self) -> int:
