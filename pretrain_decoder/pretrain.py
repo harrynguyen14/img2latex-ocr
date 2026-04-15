@@ -52,10 +52,12 @@ def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_
     ckpt_dir = out_dir / f"step_{step:07d}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # always save raw model weights (unwrap torch.compile if needed)
+    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
     if HAS_SAFETENSORS:
-        save_model(model, str(ckpt_dir / "model.safetensors"))
+        save_model(raw_model, str(ckpt_dir / "model.safetensors"))
     else:
-        torch.save(model.state_dict(), str(ckpt_dir / "model.pt"))
+        torch.save(raw_model.state_dict(), str(ckpt_dir / "model.pt"))
 
     torch.save(
         {"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "loss": loss},
@@ -77,6 +79,8 @@ def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
         sd = load_file(str(ckpt_dir / "model.safetensors"))
     else:
         sd = torch.load(str(ckpt_dir / "model.pt"), map_location="cpu")
+    # strip _orig_mod. prefix added by torch.compile when saving
+    sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in sd.items()}
     result = model.load_state_dict(sd, strict=False)
     if result.missing_keys:
         print(f"  [ckpt] missing keys: {result.missing_keys}")
