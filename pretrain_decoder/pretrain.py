@@ -73,10 +73,12 @@ def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_
 
 
 def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
+    # unwrap torch.compile wrapper if present
+    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
     if HAS_SAFETENSORS and (ckpt_dir / "model.safetensors").exists():
-        model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")))
+        raw_model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")), strict=False)
     else:
-        model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"))
+        raw_model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"), strict=False)
     trainer = torch.load(str(ckpt_dir / "trainer.pt"), map_location="cpu")
     optimizer.load_state_dict(trainer["optimizer"])
     scheduler.load_state_dict(trainer["scheduler"])
