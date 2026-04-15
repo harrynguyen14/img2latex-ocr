@@ -36,12 +36,8 @@ def parse_args():
                     default="D:/img2latex/tokenizer")
     ap.add_argument("--out-dir",         type=str,
                     default="D:/img2latex/pretrain_decoder/checkpoints")
-    ap.add_argument("--raw-dir",         type=str,
-                    default="D:/dataset-ocr-builder/latex-ocr-dataset/train/raw")
-    ap.add_argument("--light-dir",       type=str,
-                    default="D:/dataset-ocr-builder/latex-ocr-dataset/train/light_text")
-    ap.add_argument("--heavy-dir",       type=str,
-                    default="D:/dataset-ocr-builder/latex-ocr-dataset/train/heavy_text")
+    ap.add_argument("--data-dir",        type=str,
+                    default="D:/dataset-ocr-builder/latex-ocr-dataset")
     ap.add_argument("--raw-ratio",       type=float, default=0.70)
     ap.add_argument("--light-ratio",     type=float, default=0.70)
     ap.add_argument("--heavy-ratio",     type=float, default=0.30)
@@ -82,9 +78,7 @@ def main():
             compile                  = args.compile,
             tokenizer_dir            = args.tokenizer_dir,
             out_dir                  = args.out_dir,
-            raw_dir                  = args.raw_dir,
-            light_dir                = args.light_dir,
-            heavy_dir                = args.heavy_dir,
+            data_dir                 = args.data_dir,
             raw_ratio                = args.raw_ratio,
             light_ratio              = args.light_ratio,
             heavy_ratio              = args.heavy_ratio,

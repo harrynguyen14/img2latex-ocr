@@ -1,55 +1,56 @@
 import random
+from pathlib import Path
 from typing import Iterator
 
 import torch
 from torch.utils.data import IterableDataset, DataLoader
-from datasets import load_dataset
+import pyarrow.parquet as pq
 from tokenizers import Tokenizer
 
 from config import DecoderConfig
 
 
-HF_REPO = "harryrobert/latex-ocr-aug"
-
-SOURCE_VALUES = {
-    "raw":        ["raw"],
-    "light_text": ["light_text"],
-    "heavy_text": ["heavy_text"],
-}
-
-VAL_SOURCE_MAP = {
-    "val":       None,
-    "val_raw":   "raw",
-    "val_light": "light_text",
-    "val_heavy": "heavy_text",
-}
+def _split_files(path: Path, ratio: float, seed: int, val_files: int = 1) -> tuple[list[Path], list[Path]]:
+    files = sorted(path.glob("*.parquet"))
+    n_keep = max(1, round(len(files) * ratio))
+    sampled = random.Random(seed).sample(files, n_keep)
+    return sampled[val_files:], sampled[:val_files]
 
 
-def _hf_stream(hf_split: str, seed: int, source_filter: list[str] | None = None) -> Iterator[str]:
-    ds = load_dataset(HF_REPO, split=hf_split, streaming=True, trust_remote_code=True)
-    if source_filter:
-        ds = ds.filter(lambda row: row["source"] in source_filter)
-    ds = ds.shuffle(seed=seed, buffer_size=10_000)
-    for row in ds:
-        val = row.get("latex") or ""
-        if val and isinstance(val, str) and val.strip():
-            yield val.strip()
+def _stream_parquet(files: list[Path], rng: random.Random) -> Iterator[str]:
+    for pfile in files:
+        table = pq.read_table(str(pfile), columns=["latex"])
+        rows  = table["latex"].to_pylist()
+        rng.shuffle(rows)
+        for val in rows:
+            if val and isinstance(val, str) and val.strip():
+                yield val.strip()
+
+
+def _get_pools(cfg: DecoderConfig, seed: int) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+    sources = {
+        "raw":        (Path(cfg.data_dir) / "train" / "raw",        cfg.raw_ratio),
+        "light_text": (Path(cfg.data_dir) / "train" / "light_text", cfg.light_ratio),
+        "heavy_text": (Path(cfg.data_dir) / "train" / "heavy_text", cfg.heavy_ratio),
+    }
+    train_pools, val_pools = {}, {}
+    for name, (path, ratio) in sources.items():
+        tr, va = _split_files(path, ratio, seed)
+        train_pools[name] = tr
+        val_pools[name]   = va
+    return train_pools, val_pools
 
 
 def _interleaved_stream(
+    pools: dict[str, list[Path]],
     weights: dict[str, float],
-    hf_split: str,
     rng: random.Random,
-    seed: int,
 ) -> Iterator[str]:
-    iters = {
-        name: _hf_stream(hf_split, seed, SOURCE_VALUES[name])
-        for name in weights
-    }
-    active = set(weights.keys())
+    iters  = {name: _stream_parquet(files, rng) for name, files in pools.items()}
+    active = set(pools.keys())
 
     while active:
-        available = [s for s in weights if s in active]
+        available = [s for s in pools if s in active]
         if not available:
             break
         w_active = [weights[s] for s in available]
@@ -70,6 +71,7 @@ class PretrainDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[dict]:
         rng = random.Random(self.seed)
+        train_pools, val_pools = _get_pools(self.cfg, self.seed)
 
         if self.split == "train":
             weights = {
@@ -77,11 +79,16 @@ class PretrainDataset(IterableDataset):
                 "light_text": self.cfg.light_ratio,
                 "heavy_text": self.cfg.heavy_ratio,
             }
-            stream = _interleaved_stream(weights, "train", rng, self.seed)
+            stream = _interleaved_stream(train_pools, weights, rng)
+        elif self.split == "val_raw":
+            stream = _stream_parquet(val_pools["raw"], rng)
+        elif self.split == "val_light":
+            stream = _stream_parquet(val_pools["light_text"], rng)
+        elif self.split == "val_heavy":
+            stream = _stream_parquet(val_pools["heavy_text"], rng)
         else:
-            source_key = VAL_SOURCE_MAP.get(self.split)
-            source_filter = SOURCE_VALUES[source_key] if source_key else None
-            stream = _hf_stream("validation", self.seed + 1, source_filter)
+            all_val = [f for files in val_pools.values() for f in files]
+            stream  = _stream_parquet(all_val, rng)
 
         current: list[int] = []
         for text in stream:

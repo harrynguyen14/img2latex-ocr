@@ -45,14 +45,11 @@ class DecoderConfig:
 
     tokenizer_dir:    str   = "D:/img2latex/tokenizer"
     out_dir:          str   = "D:/img2latex/pretrain_decoder/checkpoints"
+    data_dir:         str   = "D:/dataset-ocr-builder/latex-ocr-dataset"
 
     raw_ratio:        float = 0.70
     light_ratio:      float = 0.70
     heavy_ratio:      float = 0.30
-
-    raw_dir:   str = "D:/dataset-ocr-builder/latex-ocr-dataset/train/raw"
-    light_dir: str = "D:/dataset-ocr-builder/latex-ocr-dataset/train/light_text"
-    heavy_dir: str = "D:/dataset-ocr-builder/latex-ocr-dataset/train/heavy_text"
 
     @property
     def head_dim(self) -> int:
