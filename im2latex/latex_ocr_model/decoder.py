@@ -23,13 +23,22 @@ class CustomDecoder(nn.Module):
 
         if decoder_ckpt:
             ckpt_dir = Path(decoder_ckpt)
-            try:
+            sf = ckpt_dir / "model.safetensors"
+            pt = ckpt_dir / "model.pt"
+            if sf.exists():
                 from safetensors.torch import load_file
-                state = load_file(str(ckpt_dir / "model.safetensors"))
-            except Exception:
-                state = torch.load(str(ckpt_dir / "model.pt"), map_location="cpu")
-            self.model.load_state_dict(state)
-            print(f"  Loaded decoder weights from {ckpt_dir.name}")
+                state = load_file(str(sf))
+            elif pt.exists():
+                state = torch.load(str(pt), map_location="cpu")
+            else:
+                raise FileNotFoundError(f"No model weights found in {ckpt_dir}")
+            # strip _orig_mod. prefix if saved from torch.compile
+            state = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+                     for k, v in state.items()}
+            missing, unexpected = self.model.load_state_dict(state, strict=False)
+            if unexpected:
+                print(f"  [decoder] unexpected keys: {unexpected[:3]}...")
+            print(f"  Loaded decoder weights from {ckpt_dir.name} (missing={len(missing)}, unexpected={len(unexpected)})")
 
         self.tokenizer = load_tokenizer(config["tokenizer_dir"])
         self.pad_token_id = decoder_cfg.pad_id
