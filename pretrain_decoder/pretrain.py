@@ -95,8 +95,8 @@ def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
     if n_states > 0:
         k = list(optimizer.state.keys())[0]
         sample_exp_avg = optimizer.state[k].get("exp_avg")
-    print(f"  [ckpt] optimizer states loaded: {n_states}, "
-          f"sample exp_avg norm={sample_exp_avg.norm().item():.4f if sample_exp_avg is not None else 'N/A'}")
+    exp_avg_norm = f"{sample_exp_avg.norm().item():.4f}" if sample_exp_avg is not None else "N/A"
+    print(f"  [ckpt] optimizer states loaded: {n_states}, sample exp_avg norm={exp_avg_norm}")
 
     scheduler.load_state_dict(trainer["scheduler"])
     return trainer["step"]
