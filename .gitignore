@@ -6,5 +6,6 @@ im2latex_v1/
 analyze_data/
 data/
 data_aug/
-__init__.py
 note.md
+dataset_builder/analyze
+dataset_builder/output
