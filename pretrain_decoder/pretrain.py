@@ -73,12 +73,10 @@ def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_
 
 
 def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
-    # unwrap torch.compile wrapper if present
-    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
     if HAS_SAFETENSORS and (ckpt_dir / "model.safetensors").exists():
-        raw_model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")), strict=False)
+        model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")), strict=False)
     else:
-        raw_model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"), strict=False)
+        model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"), strict=False)
     trainer = torch.load(str(ckpt_dir / "trainer.pt"), map_location="cpu")
     optimizer.load_state_dict(trainer["optimizer"])
     scheduler.load_state_dict(trainer["scheduler"])
@@ -147,18 +145,19 @@ def train(cfg: DecoderConfig, resume: bool = True):
     scheduler = cosine_with_warmup(optimizer, cfg.warmup_steps, cfg.max_steps)
     scaler    = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
-    if cfg.compile:
-        print("Compiling model with torch.compile ...")
-        model = torch.compile(model)
-
-    print(model)
-
+    # Load checkpoint BEFORE torch.compile so optimizer state refs match
     start_step = 0
     if resume:
         ckpt = find_latest_checkpoint(out_dir)
         if ckpt:
             print(f"Resuming from {ckpt}")
             start_step = load_checkpoint(model, optimizer, scheduler, ckpt)
+
+    if cfg.compile:
+        print("Compiling model with torch.compile ...")
+        model = torch.compile(model)
+
+    print(model)
 
     cfg.save(out_dir / "config.json")
 
