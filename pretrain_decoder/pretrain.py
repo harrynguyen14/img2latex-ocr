@@ -74,9 +74,14 @@ def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_
 
 def load_checkpoint(model, optimizer, scheduler, ckpt_dir) -> int:
     if HAS_SAFETENSORS and (ckpt_dir / "model.safetensors").exists():
-        model.load_state_dict(load_file(str(ckpt_dir / "model.safetensors")), strict=False)
+        sd = load_file(str(ckpt_dir / "model.safetensors"))
     else:
-        model.load_state_dict(torch.load(str(ckpt_dir / "model.pt"), map_location="cpu"), strict=False)
+        sd = torch.load(str(ckpt_dir / "model.pt"), map_location="cpu")
+    result = model.load_state_dict(sd, strict=False)
+    if result.missing_keys:
+        print(f"  [ckpt] missing keys: {result.missing_keys}")
+    if result.unexpected_keys:
+        print(f"  [ckpt] unexpected keys: {result.unexpected_keys}")
 
     trainer = torch.load(str(ckpt_dir / "trainer.pt"), map_location="cpu")
 
