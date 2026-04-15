@@ -1,0 +1,22 @@
+{
+  "vocab_size": 8192,
+  "special_tokens": [
+    "<pad>",
+    "<unk>",
+    "<bos>",
+    "<eos>"
+  ],
+  "pad_token": "<pad>",
+  "unk_token": "<unk>",
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "pad_id": 0,
+  "unk_id": 1,
+  "bos_id": 2,
+  "eos_id": 3,
+  "min_frequency": 2,
+  "model_max_length": 128,
+  "padding_side": "right",
+  "truncation_side": "right",
+  "tokenizer_class": "PreTrainedTokenizerFast"
+}
