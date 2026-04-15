@@ -11,6 +11,12 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Split
 from tokenizers.processors import TemplateProcessing
 
+import sys as _sys
+import pathlib as _pathlib
+_here = str(_pathlib.Path(__file__).parent)
+if _here not in _sys.path:
+    _sys.path.insert(0, _here)
+
 from vocab import (
     VOCAB_SIZE, SPECIAL_TOKENS,
     PAD_ID, UNK_ID, BOS_ID, EOS_ID,
