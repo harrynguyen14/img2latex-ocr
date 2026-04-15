@@ -132,11 +132,13 @@ def train(cfg: DecoderConfig, resume: bool = True):
 
     print(f"device={device}  amp_dtype={amp_dtype}")
 
-    tok        = load_tokenizer(cfg.tokenizer_dir)
-    train_ds   = PretrainDataset(tok, cfg, split="train")
-    val_ds     = PretrainDataset(tok, cfg, split="val")
+    tok          = load_tokenizer(cfg.tokenizer_dir)
+    train_ds     = PretrainDataset(tok, cfg, split="train")
     train_loader = build_dataloader(train_ds, cfg.batch_size, num_workers=cfg.num_workers)
-    val_loader   = build_dataloader(val_ds,   cfg.batch_size, num_workers=cfg.num_workers)
+    val_loaders  = {
+        name: build_dataloader(PretrainDataset(tok, cfg, split=name), cfg.batch_size, num_workers=cfg.num_workers)
+        for name in ("val_raw", "val_light", "val_heavy")
+    }
 
     model     = LaTeXDecoder(cfg).to(device)
     optimizer = _make_optimizer(model, cfg)
@@ -220,13 +222,21 @@ def train(cfg: DecoderConfig, resume: bool = True):
         do_save = (step % cfg.save_every_steps == 0)
 
         if do_eval:
-            eval_metrics = evaluate(model, val_loader, device, amp_dtype, cfg)
-            val_ppl = eval_metrics["val_ppl"]
-            if val_ppl < best_val_ppl:
-                best_val_ppl     = val_ppl
+            eval_metrics = {}
+            avg_val_ppl  = 0.0
+            for name, vloader in val_loaders.items():
+                m = evaluate(model, vloader, device, amp_dtype, cfg)
+                short = name.replace("val_", "")
+                eval_metrics[f"ppl_{short}"]  = m["val_ppl"]
+                eval_metrics[f"loss_{short}"] = m["val_loss"]
+                avg_val_ppl += m["val_ppl"]
+            avg_val_ppl /= len(val_loaders)
+
+            if avg_val_ppl < best_val_ppl:
+                best_val_ppl     = avg_val_ppl
                 no_improve_count = 0
                 save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, cfg.keep_last_n_ckpt)
-                tqdm.write(f"  [best] val_ppl={val_ppl:.2f} — checkpoint saved")
+                tqdm.write(f"  [best] avg_val_ppl={avg_val_ppl:.2f} — checkpoint saved")
                 do_save = False
             else:
                 no_improve_count += 1

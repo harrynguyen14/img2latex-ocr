@@ -1,44 +1,63 @@
 import random
-from pathlib import Path
 from typing import Iterator
 
 import torch
 from torch.utils.data import IterableDataset, DataLoader
-import pyarrow.parquet as pq
+from datasets import load_dataset
 from tokenizers import Tokenizer
 
 from config import DecoderConfig
 
 
-def _split_files(path: Path, ratio: float, seed: int, val_files: int = 1) -> tuple[list[Path], list[Path]]:
-    files = sorted(path.glob("*.parquet"))
-    n_keep = max(1, round(len(files) * ratio))
-    sampled = random.Random(seed).sample(files, n_keep)
-    return sampled[val_files:], sampled[:val_files]
+HF_REPO = "harryrobert/latex-ocr-aug"
+
+SOURCE_VALUES = {
+    "raw":        ["raw"],
+    "light_text": ["light_text"],
+    "heavy_text": ["heavy_text"],
+}
+
+VAL_SOURCE_MAP = {
+    "val":       None,
+    "val_raw":   "raw",
+    "val_light": "light_text",
+    "val_heavy": "heavy_text",
+}
 
 
-def _stream_files(files: list[Path], rng: random.Random) -> Iterator[str]:
-    for pfile in files:
-        table = pq.read_table(str(pfile), columns=["latex"])
-        rows  = table["latex"].to_pylist()
-        rng.shuffle(rows)
-        for val in rows:
-            if val and isinstance(val, str) and val.strip():
-                yield val.strip()
+def _hf_stream(hf_split: str, seed: int, source_filter: list[str] | None = None) -> Iterator[str]:
+    ds = load_dataset(HF_REPO, split=hf_split, streaming=True, trust_remote_code=True)
+    if source_filter:
+        ds = ds.filter(lambda row: row["source"] in source_filter)
+    ds = ds.shuffle(seed=seed, buffer_size=10_000)
+    for row in ds:
+        val = row.get("latex") or ""
+        if val and isinstance(val, str) and val.strip():
+            yield val.strip()
 
 
-def _get_file_pools(cfg: DecoderConfig, seed: int) -> tuple[list[Path], list[Path]]:
-    splits = {
-        "raw":        (Path(cfg.raw_dir),   cfg.raw_ratio),
-        "light_text": (Path(cfg.light_dir), cfg.light_ratio),
-        "heavy_text": (Path(cfg.heavy_dir), cfg.heavy_ratio),
+def _interleaved_stream(
+    weights: dict[str, float],
+    hf_split: str,
+    rng: random.Random,
+    seed: int,
+) -> Iterator[str]:
+    iters = {
+        name: _hf_stream(hf_split, seed, SOURCE_VALUES[name])
+        for name in weights
     }
-    train_pool, val_pool = [], []
-    for name, (path, ratio) in splits.items():
-        tr, va = _split_files(path, ratio, seed)
-        train_pool.extend(tr)
-        val_pool.extend(va)
-    return train_pool, val_pool
+    active = set(weights.keys())
+
+    while active:
+        available = [s for s in weights if s in active]
+        if not available:
+            break
+        w_active = [weights[s] for s in available]
+        chosen   = rng.choices(available, weights=w_active, k=1)[0]
+        try:
+            yield next(iters[chosen])
+        except StopIteration:
+            active.discard(chosen)
 
 
 class PretrainDataset(IterableDataset):
@@ -51,12 +70,21 @@ class PretrainDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[dict]:
         rng = random.Random(self.seed)
-        train_pool, val_pool = _get_file_pools(self.cfg, self.seed)
-        file_pool = train_pool if self.split == "train" else val_pool
-        rng.shuffle(file_pool)
+
+        if self.split == "train":
+            weights = {
+                "raw":        self.cfg.raw_ratio,
+                "light_text": self.cfg.light_ratio,
+                "heavy_text": self.cfg.heavy_ratio,
+            }
+            stream = _interleaved_stream(weights, "train", rng, self.seed)
+        else:
+            source_key = VAL_SOURCE_MAP.get(self.split)
+            source_filter = SOURCE_VALUES[source_key] if source_key else None
+            stream = _hf_stream("validation", self.seed + 1, source_filter)
 
         current: list[int] = []
-        for text in _stream_files(file_pool, rng):
+        for text in stream:
             ids = self.tokenizer.encode(text).ids
             if len(ids) > self.cfg.max_seq_len:
                 ids = ids[:self.cfg.max_seq_len]

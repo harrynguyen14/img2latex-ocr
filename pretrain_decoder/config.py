@@ -15,7 +15,7 @@ class DecoderConfig:
     n_layers:         int   = 6
     d_ff:             int   = 1408
     dropout:          float = 0.1
-    max_seq_len:      int   = 128
+    max_seq_len:      int   = 200
     rope_theta:       float = 10000.0
     tie_weights:      bool  = True
 
