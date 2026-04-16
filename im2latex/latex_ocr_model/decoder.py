@@ -14,12 +14,10 @@ class CustomDecoder(nn.Module):
         hf_config = AutoConfig.from_pretrained(
             repo_id,
             trust_remote_code=True,
-            force_download=True
         )
         hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             trust_remote_code=True,
-            force_download=True
         )
         print(f"  Loaded decoder from HF: {repo_id}")
 
