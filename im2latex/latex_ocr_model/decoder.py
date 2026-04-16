@@ -11,8 +11,16 @@ class CustomDecoder(nn.Module):
     def __init__(self, config: dict):
         super().__init__()
         repo_id   = config.get("decoder_ckpt") or HF_REPO_ID
-        hf_config = AutoConfig.from_pretrained(repo_id)
-        hf_model  = AutoModelForCausalLM.from_pretrained(repo_id)
+        hf_config = AutoConfig.from_pretrained(
+            repo_id,
+            trust_remote_code=True,
+            force_download=True
+        )
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            repo_id,
+            trust_remote_code=True,
+            force_download=True
+        )
         print(f"  Loaded decoder from HF: {repo_id}")
 
         self._model       = hf_model
