@@ -109,7 +109,7 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, tokenizer, max_batches: 
         preds.extend(gen)
         for ids in batch["labels"].cpu().tolist():
             clean = [x for x in ids if x not in (-100, pad_id)]
-            refs.append(tokenizer.decode(clean))
+            refs.append(tokenizer.decode(clean, skip_special_tokens=True))
     model.train()
     return compute_metrics(preds, refs)
 
