@@ -147,12 +147,15 @@ class Trainer:
         self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps, self.total_steps)
 
         self.decoder_warmup_steps = getattr(args, "decoder_warmup_steps", 0)
-        if self.decoder_warmup_steps > 0:
-            self.model.freeze_decoder()
-            print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
 
         if getattr(args, "resume", None):
             self._load_resume(Path(args.resume))
+
+        if self.decoder_warmup_steps > 0 and self.global_step < self.decoder_warmup_steps:
+            self.model.freeze_decoder()
+            print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
+        elif self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
+            print(f"Resuming at step {self.global_step} — decoder already unfrozen")
 
     def _load_resume(self, resume_dir: Path):
         sf = resume_dir / "model.safetensors"
