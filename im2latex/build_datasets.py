@@ -1,7 +1,7 @@
 from pathlib import Path
 from torch.utils.data import DataLoader, IterableDataset
 
-from .preprocessor import LaTeXOCRHFDataset, LaTeXOCRDiskDataset, LaTeXOCRParquetDataset, LaTeXOCRFlatParquetDataset
+from .preprocessor import LaTeXOCRHFDataset, LaTeXOCRParquetDataset, LaTeXOCRFlatParquetDataset
 
 DISK_CACHE_DIR = "/kaggle/working/cache"
 
@@ -44,21 +44,16 @@ def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer
 
             return train_ds, val_ds
 
-    # HF disk cache
-    train_cache = Path(DISK_CACHE_DIR) / args.train_split
-    val_cache   = Path(DISK_CACHE_DIR) / args.val_split
-    if train_cache.exists() and val_cache.exists():
-        print(f"[dataset] disk cache found → {DISK_CACHE_DIR}")
-        return (
-            LaTeXOCRDiskDataset(str(train_cache), tokenizer, args, rank=rank, world_size=world_size),
-            LaTeXOCRDiskDataset(str(val_cache),   tokenizer, args, rank=rank, world_size=world_size),
-        )
-
     # HF streaming fallback
-    print(f"[dataset] HF streaming → {data_source}")
+    sources = getattr(args, "sources", _DEFAULT_SOURCES)
+    weights = getattr(args, "weights", _DEFAULT_WEIGHTS)
+    print(f"[dataset] HF streaming → {data_source}  names={sources}")
     return (
-        LaTeXOCRHFDataset(data_source, args.train_split, tokenizer, args, rank=rank, world_size=world_size),
-        LaTeXOCRHFDataset(data_source, args.val_split,   tokenizer, args, rank=rank, world_size=world_size),
+        LaTeXOCRHFDataset(data_source, "train", tokenizer, args,
+                          rank=rank, world_size=world_size,
+                          names=sources, weights=weights),
+        LaTeXOCRHFDataset(data_source, "validation", tokenizer, args,
+                          rank=rank, world_size=world_size),
     )
 
 

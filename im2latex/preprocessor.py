@@ -88,19 +88,45 @@ def _process(sample: dict, tokenizer, args) -> dict:
 
 
 class LaTeXOCRHFDataset(IterableDataset):
-    def __init__(self, dataset_id: str, split: str, tokenizer, args, rank: int = 0, world_size: int = 1):
-        from datasets import load_dataset
-        self.tokenizer   = tokenizer
-        self.args        = args
-        self.num_samples = None
-        ds = load_dataset(dataset_id, split=split, streaming=True)
+    def __init__(self, dataset_id: str, split: str, tokenizer, args,
+                 rank: int = 0, world_size: int = 1,
+                 names: list[str] | None = None,
+                 weights: list[float] | None = None,
+                 seed: int = 42):
+        from datasets import load_dataset, interleave_datasets
+        self.tokenizer = tokenizer
+        self.args      = args
+        self.rank      = rank
+        self.world_size = world_size
+        self.seed      = seed
+
+        if names and split == "train":
+            subsets = []
+            for name in names:
+                ds = load_dataset(
+                    dataset_id,
+                    data_files={"train": f"train/{name}/*.parquet"},
+                    split="train",
+                    streaming=True,
+                )
+                subsets.append(ds)
+            probs = None
+            if weights:
+                total = sum(weights)
+                probs = [w / total for w in weights]
+            self.ds = interleave_datasets(subsets, probabilities=probs, seed=seed)
+        else:
+            self.ds = load_dataset(dataset_id, split=split, streaming=True)
+
         if world_size > 1:
-            ds = ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
-        self.ds = ds
+            self.ds = self.ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
 
     def __iter__(self):
         for sample in self.ds:
-            yield _process(sample, self.tokenizer, self.args)
+            try:
+                yield _process(sample, self.tokenizer, self.args)
+            except Exception:
+                pass
 
 
 class LaTeXOCRDiskDataset(IterableDataset):

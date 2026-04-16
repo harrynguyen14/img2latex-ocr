@@ -1,5 +1,4 @@
 import os
-import math
 import torch
 from typing import Any
 import torch.distributed as dist
@@ -35,16 +34,6 @@ def move_batch(batch, device):
         "attention_mask": batch["attention_mask"].to(device, non_blocking=True),
         "labels": batch["labels"].to(device, non_blocking=True),
     }
-
-
-def lr_cosine(step: int, total: int, peak: float, warmup_ratio: float = 0.03, min_lr_ratio: float = 0.1) -> float:
-    warmup = int(total * warmup_ratio)
-    if step < warmup:
-        return peak * step / max(warmup, 1)
-    t = (step - warmup) / max(total - warmup, 1)
-    t = min(t, 1.0)
-    min_lr = peak * min_lr_ratio
-    return min_lr + (peak - min_lr) * 0.5 * (1.0 + math.cos(math.pi * t))
 
 
 def configure_runtime(cfg, device: torch.device):

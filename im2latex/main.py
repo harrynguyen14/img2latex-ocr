@@ -14,10 +14,8 @@ from .trainer import Trainer
 def parse_args():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--dataset_id",                  type=str,   default="harryrobert/latex-ocr-v3")
-    ap.add_argument("--data_path",                   type=str,   default="")
-    ap.add_argument("--train_split",                 type=str,   default="full_train")
-    ap.add_argument("--val_split",                   type=str,   default="dev")
+    ap.add_argument("--dataset_id",                  type=str,   default="harryrobert/latex-ocr-aug")
+    ap.add_argument("--data_path",                   type=str,   default="/workspace/data")
     ap.add_argument("--sources",     nargs="+",      type=str,   default=["raw", "light", "heavy"])
     ap.add_argument("--weights",     nargs="+",      type=float, default=[1.0, 1.0, 1.0])
     ap.add_argument("--max_token_len",               type=int,   default=200)

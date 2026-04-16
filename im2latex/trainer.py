@@ -46,11 +46,8 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float) -> Ada
 
 def _save_checkpoint(model: LaTeXOCRModel, optimizer, scheduler, step, ckpt_dir: Path, keep_last_n: int):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    state = {}
-    for k, v in model.visual_encoder.state_dict().items():
-        state[f"visual_encoder.{k}"] = v.contiguous().cpu()
-    for k, v in model.decoder.model.state_dict().items():
-        state[f"decoder.model.{k}"] = v.contiguous().cpu()
+    state = {f"visual_encoder.{k}": v.contiguous().cpu()
+             for k, v in model.visual_encoder.state_dict().items()}
 
     if HAS_SAFETENSORS:
         st_save_file(state, ckpt_dir / "model.safetensors")
@@ -103,7 +100,7 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, tokenizer, max_batches: 
     """Slow validation: generate + BLEU/exact/edit-distance."""
     model.eval()
     preds, refs = [], []
-    pad_id = tokenizer.token_to_id("[PAD]") or 0
+    pad_id = tokenizer.token_to_id("<pad>") or 0
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
@@ -143,8 +140,8 @@ class Trainer:
             torch.backends.cudnn.benchmark        = True
 
         if getattr(args, "torch_compile", False):
-            print("Compiling model with torch.compile ...")
-            self.model = torch.compile(self.model)
+            print("Compiling visual_encoder with torch.compile ...")
+            self.model.visual_encoder = torch.compile(self.model.visual_encoder)
 
         self.optimizer = _make_optimizer(self.model, args.lr_stage1, args.weight_decay)
         self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps, self.total_steps)
@@ -169,19 +166,21 @@ class Trainer:
             print(f"[resume] No model file in {resume_dir}")
             return
 
-        ve_state  = {k.replace("visual_encoder.", ""): v for k, v in state.items() if k.startswith("visual_encoder.")}
-        dec_state = {k.replace("decoder.model.", ""): v for k, v in state.items() if k.startswith("decoder.model.")}
+        ve_state = {k.replace("visual_encoder.", ""): v for k, v in state.items() if k.startswith("visual_encoder.")}
         if ve_state:
             self.model.visual_encoder.load_state_dict(ve_state, strict=True)
             print(f"[resume] visual_encoder loaded")
-        if dec_state:
-            self.model.decoder.model.load_state_dict(dec_state, strict=False)
-            print(f"[resume] decoder loaded")
 
         trainer_pt = resume_dir / "trainer.pt"
         if trainer_pt.exists():
             ts = torch.load(str(trainer_pt), map_location="cpu")
-            self.optimizer.load_state_dict(ts["optimizer"])
+            opt_state = ts["optimizer"]
+            device = next(self.model.parameters()).device
+            for state in opt_state["state"].values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
+            self.optimizer.load_state_dict(opt_state)
             self.scheduler.load_state_dict(ts["scheduler"])
             self.global_step = ts.get("step", 0)
             print(f"[resume] step={self.global_step}")
@@ -212,6 +211,7 @@ class Trainer:
                     dynamic_ncols=True, file=sys.stdout, position=0, leave=True)
 
         self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
         while self.global_step < self.total_steps:
             try:
                 batch = next(data_iter)
