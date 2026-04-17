@@ -66,76 +66,86 @@ class CustomDecoder(nn.Module):
     @torch.no_grad()
     def _beam_search(self, inputs_embeds, attention_mask, max_new_tokens, num_beams, eos_id, pad_id):
         """Beam search decode (num_beams=1 = greedy), batch_size=1 only."""
-        device = inputs_embeds.device
-        B      = inputs_embeds.shape[0]
+        device   = inputs_embeds.device
+        B        = inputs_embeds.shape[0]
         assert B == 1, "beam search only supports batch_size=1"
 
-        # expand to (num_beams, seq_len, D)
-        embeds = inputs_embeds.expand(num_beams, -1, -1)          # (K, S, D)
-        mask   = attention_mask.expand(num_beams, -1) if attention_mask is not None else None
+        vis_emb  = inputs_embeds[0]                               # (S, D)
+        vis_len  = vis_emb.shape[0]
+        vis_mask = attention_mask[0] if attention_mask is not None else None
 
-        beam_scores = torch.zeros(num_beams, device=device)       # log-probs
-        beam_ids    = [[] for _ in range(num_beams)]              # generated token ids per beam
-        done        = [False] * num_beams
+        # Each beam: (score, [token_ids], done)
+        beams = [(0.0, [], False)] * num_beams
 
         for _ in range(max_new_tokens):
-            logits = self._forward_embeds(embeds, mask)           # (K, S, V)
-            log_p  = torch.log_softmax(logits[:, -1, :], dim=-1)  # (K, V)
+            # Build batch: visual embeds + generated token embeds for each beam
+            all_embeds = []
+            all_masks  = []
+            active_idx = []  # beams that are not done
 
-            # scores for each (beam, token) combination
-            scores = beam_scores.unsqueeze(1) + log_p             # (K, V)
-            # flatten and pick top-K
-            flat   = scores.view(-1)                              # (K*V,)
-            topk_scores, topk_idx = flat.topk(num_beams, sorted=True)
+            for k, (score, ids, done) in enumerate(beams):
+                if ids:
+                    tok_tensor = torch.tensor(ids, device=device, dtype=torch.long)
+                    tok_emb    = self._model.embed_tokens(tok_tensor)  # (T, D)
+                    seq_emb    = torch.cat([vis_emb, tok_emb], dim=0)  # (S+T, D)
+                else:
+                    seq_emb = vis_emb                                  # (S, D)
 
-            vocab_size  = log_p.shape[-1]
-            beam_origin = topk_idx // vocab_size                  # which beam each came from
-            next_tokens = topk_idx %  vocab_size                  # which token
+                all_embeds.append(seq_emb)
+                if vis_mask is not None:
+                    if ids:
+                        tok_mask = vis_mask.new_ones(len(ids))
+                        all_masks.append(torch.cat([vis_mask, tok_mask]))
+                    else:
+                        all_masks.append(vis_mask)
+                active_idx.append(k)
 
-            new_embeds     = []
-            new_mask       = []
-            new_beam_ids   = []
-            new_beam_scores = []
+            # Pad to same length for batched forward
+            max_len = max(e.shape[0] for e in all_embeds)
+            D       = all_embeds[0].shape[-1]
+            padded_embeds = vis_emb.new_zeros(num_beams, max_len, D)
+            padded_mask   = None
+            if vis_mask is not None:
+                padded_mask = vis_mask.new_zeros(num_beams, max_len)
 
-            for k in range(num_beams):
-                src   = beam_origin[k].item()
-                tok   = next_tokens[k].item()
-                score = topk_scores[k].item()
+            for k, (emb, msk) in enumerate(zip(all_embeds, all_masks if vis_mask is not None else [None]*num_beams)):
+                L = emb.shape[0]
+                padded_embeds[k, :L] = emb
+                if padded_mask is not None:
+                    padded_mask[k, :L] = msk
 
-                if done[src]:
-                    new_beam_ids.append(beam_ids[src])
-                    new_beam_scores.append(beam_scores[src].item())
-                    new_embeds.append(embeds[src])
-                    if mask is not None:
-                        new_mask.append(mask[src])
+            logits = self._forward_embeds(padded_embeds, padded_mask)  # (K, max_len, V)
+
+            # Use logit at last real token position for each beam
+            new_beams = []
+            candidates = []
+            for k, (score, ids, done) in enumerate(beams):
+                last_pos = vis_len + len(ids) - 1
+                if done:
+                    candidates.append((score, ids, True, k, pad_id))
                     continue
+                log_p = torch.log_softmax(logits[k, last_pos, :], dim=-1)  # (V,)
+                # On first step only beam 0 is active; expand after
+                if len(ids) == 0 and k > 0:
+                    log_p = log_p.fill_(-1e9)
+                topk_lp, topk_tok = log_p.topk(num_beams)
+                for lp, tok in zip(topk_lp.tolist(), topk_tok.tolist()):
+                    candidates.append((score + lp, ids + [tok], tok == eos_id, k, tok))
 
-                new_ids = beam_ids[src] + [tok]
-                new_beam_ids.append(new_ids)
-                new_beam_scores.append(score)
+            # Pick top-K candidates
+            candidates.sort(key=lambda x: -x[0])
+            candidates = candidates[:num_beams]
 
-                tok_emb    = self._model.embed_tokens(
-                    torch.tensor([tok], device=device)
-                ).unsqueeze(0)                                    # (1, 1, D)
-                new_embeds.append(torch.cat([embeds[src:src+1], tok_emb], dim=1).squeeze(0))
-                if mask is not None:
-                    new_mask.append(torch.cat([mask[src:src+1],
-                                               mask.new_ones(1, 1)], dim=1).squeeze(0))
+            for score, ids, done, src_k, tok in candidates:
+                new_beams.append((score, ids, done))
 
-                if tok == eos_id:
-                    done[k] = True
+            beams = new_beams
 
-            embeds      = torch.stack(new_embeds, dim=0)
-            beam_ids    = new_beam_ids
-            beam_scores = torch.tensor(new_beam_scores, device=device)
-            if mask is not None:
-                mask = torch.stack(new_mask, dim=0)
-
-            if all(done):
+            if all(done for _, _, done in beams):
                 break
 
-        # return best beam (index 0 = highest score)
-        best = beam_ids[0]
-        if not best:
+        # Return best beam (highest score)
+        best_score, best_ids, _ = max(beams, key=lambda x: x[0])
+        if not best_ids:
             return torch.zeros(B, 0, dtype=torch.long, device=device)
-        return torch.tensor(best, dtype=torch.long, device=device).unsqueeze(0)
+        return torch.tensor(best_ids, dtype=torch.long, device=device).unsqueeze(0)
