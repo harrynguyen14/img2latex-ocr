@@ -75,7 +75,7 @@ class CustomDecoder(nn.Module):
         vis_mask = attention_mask[0] if attention_mask is not None else None
 
         # Each beam: (score, [token_ids], done)
-        beams = [(0.0, [], False)] * num_beams
+        beams = [(0.0, [], False) for _ in range(num_beams)]
 
         for _ in range(max_new_tokens):
             # Build batch: visual embeds + generated token embeds for each beam

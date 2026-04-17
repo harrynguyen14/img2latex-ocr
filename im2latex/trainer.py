@@ -396,11 +396,15 @@ class Trainer:
             if self.global_step % eval_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)
                 bleu_batches = max(getattr(args, "bleu_samples", 1500) // ebs, 1)
-                bleu_metrics = run_bleu_eval(
-                    self.model, self.val_loader, self.device, bleu_batches
-                )
-                print_metrics(bleu_metrics, prefix=f"step {self.global_step}")
-                tqdm.write(str({"step": self.global_step, **bleu_metrics}))
+                try:
+                    bleu_metrics = run_bleu_eval(
+                        self.model, self.val_loader, self.device, bleu_batches
+                    )
+                    print_metrics(bleu_metrics, prefix=f"step {self.global_step}")
+                    tqdm.write(str({"step": self.global_step, **bleu_metrics}))
+                except Exception as e:
+                    tqdm.write(f"[eval] BLEU eval failed at step {self.global_step}: {e}")
+                    self.model.train()
 
             if self.global_step % args.save_steps == 0:
                 _save_checkpoint(
