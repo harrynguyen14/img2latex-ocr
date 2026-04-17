@@ -176,24 +176,21 @@ class Attention(nn.Module):
                 # varlen path: unpad → flash_attn_varlen_func → pad back
                 # mask: (B, N) bool — True = valid
                 B, N = mask.shape
-                lengths = mask.sum(dim=1).to(torch.int32)           # (B,)
-                cu_seqlens = F.pad(lengths.cumsum(0), (1, 0)).to(torch.int32)
-                max_seqlen = lengths.max().item()
 
-                q_unpad, _, _, _ = unpad_input(q_, mask)
-                k_unpad, _, _, _ = unpad_input(k_, mask)
-                v_unpad, _, _, _ = unpad_input(v_, mask)
+                q_unpad, indices, cu_seqlens_q, max_seqlen_q, *_ = unpad_input(q_, mask)
+                k_unpad, _, cu_seqlens_k, max_seqlen_k, *_ = unpad_input(k_, mask)
+                v_unpad, _, _, _, *_ = unpad_input(v_, mask)
 
                 out_unpad = flash_attn_varlen_func(
                     q_unpad, k_unpad, v_unpad,
-                    cu_seqlens_q=cu_seqlens,
-                    cu_seqlens_k=cu_seqlens,
-                    max_seqlen_q=max_seqlen,
-                    max_seqlen_k=max_seqlen,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
                     dropout_p=self.dropout.p if self.training else 0.0,
                     causal=False,
                 )
-                out = pad_input(out_unpad, None, B, N)              # (B, N, H, D)
+                out = pad_input(out_unpad, indices, B, N)           # (B, N, H, D)
             else:
                 out = flash_attn_func(
                     q_, k_, v_,
