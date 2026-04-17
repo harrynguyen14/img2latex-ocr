@@ -1,0 +1,9 @@
+transformers
+tokenizers
+safetensors
+datasets
+einops
+numpy
+pyarrow
+Pillow
+tqdm

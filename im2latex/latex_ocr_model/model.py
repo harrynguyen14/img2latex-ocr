@@ -5,6 +5,16 @@ from .decoder import CustomDecoder
 from .mlp_projector import MLPProjector
 from .encoder import NaViT_Encoder
 
+def decode_ids(tokenizer, ids: list[int], skip_ids: set[int] | None = None) -> str:
+    """Decode token ids bằng id_to_token join.
+    
+    tok.decode() của tokenizers library thêm spaces không mong muốn giữa
+    các sub-word token (e.g. '\\frac' → '\\ f r a c'). id_to_token join
+    là cách duy nhất cho kết quả đúng với BPE tokenizer này.
+    """
+    if skip_ids is None:
+        skip_ids = set()
+    return "".join(tokenizer.id_to_token(i) for i in ids if i not in skip_ids)
 
 class VisualEncoder(nn.Module):
     def __init__(self, encoder: NaViT_Encoder, bridge: MLPProjector, max_visual_tokens: int):
@@ -97,34 +107,39 @@ class LaTeXOCRModel(nn.Module):
         )
 
     @torch.no_grad()
-    def generate(
-        self,
-        batched_images,
-        max_new_tokens: int | None = None,
-        num_beams: int | None = None,
-    ):
+    def generate(self, batched_images, max_new_tokens=None, num_beams=None):
         self.eval()
         cfg = self.config
         max_new_tokens = max_new_tokens or cfg.get("max_new_tokens", 256)
-        num_beams = num_beams or cfg.get("num_beams", 4)
+        
         ve, vm = self.visual_encoder(batched_images)
-        inputs_embeds = ve
-        attention_mask = vm.to(dtype=torch.long)
-        prompt_len = inputs_embeds.shape[1]
-        out = self.decoder.generate(
+        B = ve.shape[0]
+
+        bos_id = torch.full((B, 1), self.decoder.tokenizer.token_to_id("<bos>"),
+                            dtype=torch.long, device=ve.device)
+        bos_emb = self.decoder.get_input_embeddings()(bos_id)  # (B, 1, D)
+        
+        inputs_embeds = torch.cat([ve, bos_emb], dim=1)
+        attention_mask = torch.cat([
+            vm.to(dtype=torch.long),
+            torch.ones(B, 1, dtype=torch.long, device=ve.device)
+        ], dim=1)
+        
+        # _beam_search returns generated tokens only (no prompt prefix)
+        gen_ids = self.decoder.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
+            num_beams=num_beams if num_beams is not None else cfg.get("num_beams", 4),
             pad_token_id=self.decoder.pad_token_id,
             eos_token_id=self.decoder.eos_token_id,
         )
-        if out.shape[1] > prompt_len:
-            gen = out[:, prompt_len:]
-        else:
-            gen = out
+        bos_id = self.tokenizer.token_to_id("<bos>")
+        skip = {self.decoder.pad_token_id, self.decoder.eos_token_id}
+        if bos_id is not None:
+            skip.add(bos_id)
         return [
-            self.tokenizer.decode(ids.tolist(), skip_special_tokens=True)
-            for ids in gen
+            decode_ids(self.tokenizer, ids.tolist(), skip_ids=skip)
+            for ids in gen_ids
         ]
 

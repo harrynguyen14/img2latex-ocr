@@ -43,6 +43,7 @@ def parse_args():
     ap.add_argument("--decoder_warmup_steps",        type=int,   default=2000)
     ap.add_argument("--epochs",                      type=int,   default=1)
     ap.add_argument("--batch_size",                  type=int,   default=1)
+    ap.add_argument("--eval_batch_size",             type=int,   default=1)
     ap.add_argument("--grad_accum",                  type=int,   default=32)
     ap.add_argument("--lr_stage1",                   type=float, default=1e-4)
     ap.add_argument("--lr_stage2",                   type=float, default=2e-5)
@@ -51,9 +52,12 @@ def parse_args():
     ap.add_argument("--warmup_ratio",                type=float, default=0.05)
     ap.add_argument("--max_steps",                   type=int,   default=10000)
     ap.add_argument("--log_steps",                   type=int,   default=50)
-    ap.add_argument("--eval_steps",                  type=int,   default=500)
+    ap.add_argument("--val_loss_steps",              type=int,   default=2500)   # val_loss every N steps
+    ap.add_argument("--eval_steps",                  type=int,   default=10000)  # BLEU eval every N steps
     ap.add_argument("--save_steps",                  type=int,   default=10000)
-    ap.add_argument("--eval_samples",                type=int,   default=64)
+    ap.add_argument("--eval_samples",                type=int,   default=512)    # samples for val_loss
+    ap.add_argument("--bleu_samples",                type=int,   default=1500)   # samples for BLEU (best ckpt selection)
+    ap.add_argument("--final_eval_samples",          type=int,   default=0)      # 0 = full val set
     ap.add_argument("--num_workers",                 type=int,   default=1)
     ap.add_argument("--prefetch_factor",             type=int,   default=4)
     ap.add_argument("--persistent_workers",          action="store_true", default=False)
@@ -98,11 +102,12 @@ def main():
     train_ds, val_ds = build_datasets(args, data_source, rank, world_size, tokenizer)
 
     bs         = args.batch_size
+    ebs        = args.eval_batch_size
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
     persistent = args.persistent_workers and nw > 0
-    train_loader = build_dataloader(train_ds, bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
-    val_loader   = build_dataloader(val_ds,   bs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
+    train_loader = build_dataloader(train_ds, bs,  nw, collate_fn, device.type == "cuda", prefetch, persistent)
+    val_loader   = build_dataloader(val_ds,   ebs, nw, collate_fn, device.type == "cuda", prefetch, persistent)
 
     TrainerCls = Trainer
     trainer = TrainerCls(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)

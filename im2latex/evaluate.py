@@ -24,18 +24,23 @@ def edit_distance(seq1: list, seq2: list) -> int:
 def compute_metrics(predictions: list, references: list) -> dict:
     hyp = [tokenize_latex(x) for x in predictions]
     ref = [[tokenize_latex(x)] for x in references]
+
     bleu = corpus_bleu(ref, hyp, smoothing_function=SmoothingFunction().method1)
-    exact = sum(p.strip() == r.strip() for p, r in zip(predictions, references)) / max(len(references), 1)
+
+    # Token-level exact match — nhất quán với BLEU và edit_distance
+    exact = sum(h == r[0] for h, r in zip(hyp, ref)) / max(len(ref), 1)
+
+    # Tái dùng hyp/ref đã tokenize, tránh gọi tokenize_latex 4 lần/cặp
     eds = [
-        edit_distance(tokenize_latex(p), tokenize_latex(r))
-        / max(len(tokenize_latex(p)), len(tokenize_latex(r)), 1)
-        for p, r in zip(predictions, references)
+        edit_distance(h, r[0]) / max(len(h), len(r[0]), 1)
+        for h, r in zip(hyp, ref)
     ]
+
     return {
-        "bleu4": round(float(bleu), 4),
-        "exact_match": round(float(exact), 4),
+        "bleu4":         round(float(bleu), 4),
+        "exact_match":   round(float(exact), 4),
         "edit_distance": round(float(np.mean(eds)), 4),
-        "n_samples": len(predictions),
+        "n_samples":     len(predictions),
     }
 
 
