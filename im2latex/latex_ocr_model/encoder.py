@@ -6,6 +6,13 @@ from typing import List
 from functools import partial
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import unpad_input, pad_input
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
+
 def exists(val):
     return val is not None
 
@@ -159,20 +166,58 @@ class Attention(nn.Module):
             h_idx, w_idx = positions
             q, k = apply_2d_rope(q, k, h_idx, w_idx)
 
-        dots = torch.matmul(q, k.transpose(-1, -2))
+        if HAS_FLASH_ATTN and x.is_cuda and attn_mask is None:
+            # flash_attn expects (B, N, H, D)
+            q_ = rearrange(q, 'b h n d -> b n h d').contiguous()
+            k_ = rearrange(k, 'b h n d -> b n h d').contiguous()
+            v_ = rearrange(v, 'b h n d -> b n h d').contiguous()
 
-        if exists(mask):
-            mask_ = mask[:, None, None, :]
-            dots = dots.masked_fill(~mask_, -torch.finfo(dots.dtype).max)
+            if exists(mask):
+                # varlen path: unpad → flash_attn_varlen_func → pad back
+                # mask: (B, N) bool — True = valid
+                B, N = mask.shape
+                lengths = mask.sum(dim=1).to(torch.int32)           # (B,)
+                cu_seqlens = F.pad(lengths.cumsum(0), (1, 0)).to(torch.int32)
+                max_seqlen = lengths.max().item()
 
-        if exists(attn_mask):
-            dots = dots.masked_fill(~attn_mask, -torch.finfo(dots.dtype).max)
+                q_unpad, _, _, _ = unpad_input(q_, mask)
+                k_unpad, _, _, _ = unpad_input(k_, mask)
+                v_unpad, _, _, _ = unpad_input(v_, mask)
 
-        attn = self.attend(dots)
-        attn = self.dropout(attn)
+                out_unpad = flash_attn_varlen_func(
+                    q_unpad, k_unpad, v_unpad,
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seqlen,
+                    max_seqlen_k=max_seqlen,
+                    dropout_p=self.dropout.p if self.training else 0.0,
+                    causal=False,
+                )
+                out = pad_input(out_unpad, None, B, N)              # (B, N, H, D)
+            else:
+                out = flash_attn_func(
+                    q_, k_, v_,
+                    dropout_p=self.dropout.p if self.training else 0.0,
+                    causal=False,
+                )                                                    # (B, N, H, D)
 
-        out = torch.matmul(attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
+            out = rearrange(out, 'b n h d -> b n (h d)')
+        else:
+            # standard attention fallback (CPU hoặc không có flash-attn)
+            dots = torch.matmul(q, k.transpose(-1, -2))
+
+            if exists(mask):
+                mask_ = mask[:, None, None, :]
+                dots = dots.masked_fill(~mask_, -torch.finfo(dots.dtype).max)
+
+            if exists(attn_mask):
+                dots = dots.masked_fill(~attn_mask, -torch.finfo(dots.dtype).max)
+
+            attn = self.attend(dots)
+            attn = self.dropout(attn)
+
+            out = torch.matmul(attn, v)
+            out = rearrange(out, 'b h n d -> b n (h d)')
 
         return self.to_out(out)
 

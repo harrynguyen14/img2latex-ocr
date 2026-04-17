@@ -20,7 +20,7 @@ def parse_args():
     ap.add_argument("--weights",     nargs="+",      type=float, default=[1.0, 1.0, 1.0])
     ap.add_argument("--max_token_len",               type=int,   default=200)
     ap.add_argument("--image_height",                type=int,   default=64)
-    ap.add_argument("--max_image_width",             type=int,   default=672)
+    ap.add_argument("--max_image_width",             type=int,   default=1024)
     ap.add_argument("--max_image_height",            type=int,   default=640)
     ap.add_argument("--patch_size",                  type=int,   default=16)
     ap.add_argument("--resize_in_dataset",           action="store_true", default=True)
