@@ -167,10 +167,11 @@ class Attention(nn.Module):
             q, k = apply_2d_rope(q, k, h_idx, w_idx)
 
         if HAS_FLASH_ATTN and x.is_cuda and attn_mask is None:
-            # flash_attn expects (B, N, H, D)
-            q_ = rearrange(q, 'b h n d -> b n h d').contiguous()
-            k_ = rearrange(k, 'b h n d -> b n h d').contiguous()
-            v_ = rearrange(v, 'b h n d -> b n h d').contiguous()
+            # flash_attn expects (B, N, H, D) in fp16 or bf16
+            fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+            q_ = rearrange(q, 'b h n d -> b n h d').contiguous().to(fa_dtype)
+            k_ = rearrange(k, 'b h n d -> b n h d').contiguous().to(fa_dtype)
+            v_ = rearrange(v, 'b h n d -> b n h d').contiguous().to(fa_dtype)
 
             if exists(mask):
                 # varlen path: unpad → flash_attn_varlen_func → pad back
@@ -198,7 +199,7 @@ class Attention(nn.Module):
                     causal=False,
                 )                                                    # (B, N, H, D)
 
-            out = rearrange(out, 'b n h d -> b n (h d)')
+            out = rearrange(out, 'b n h d -> b n (h d)').to(x.dtype)
         else:
             # standard attention fallback (CPU hoặc không có flash-attn)
             dots = torch.matmul(q, k.transpose(-1, -2))
