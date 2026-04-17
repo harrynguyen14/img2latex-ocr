@@ -19,7 +19,7 @@ except ImportError:
 from .utils import move_batch
 from .latex_ocr_model import LaTeXOCRModel
 from .evaluate import compute_metrics, print_metrics
-from latex_ocr_model.model import decode_ids
+from .latex_ocr_model.model import decode_ids
 
 
 def cosine_with_warmup(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
@@ -377,7 +377,8 @@ class Trainer:
 
             # --- val_loss (fast, frequent) ---
             if self.global_step % val_loss_steps == 0:
-                max_val_batches = max(args.eval_samples // args.batch_size, 1)
+                ebs = getattr(args, "eval_batch_size", 1)
+                max_val_batches = max(args.eval_samples // ebs, 1)
                 val_metrics = run_val_loss(self.model, self.val_loader, self.device, max_val_batches)
                 log = {"step": self.global_step, **val_metrics}
                 tqdm.write(str(log))
@@ -393,7 +394,8 @@ class Trainer:
 
             # --- BLEU eval (slow, infrequent) ---
             if self.global_step % eval_steps == 0:
-                bleu_batches = max(getattr(args, "bleu_samples", 1500) // args.batch_size, 1)
+                ebs = getattr(args, "eval_batch_size", 1)
+                bleu_batches = max(getattr(args, "bleu_samples", 1500) // ebs, 1)
                 bleu_metrics = run_bleu_eval(
                     self.model, self.val_loader, self.device, bleu_batches
                 )
@@ -418,9 +420,10 @@ class Trainer:
         print(f"Training done at step {self.global_step}. Best val_ppl={self.best_val_ppl:.2f}")
 
         # --- final benchmark on full val set ---
+        ebs = getattr(args, "eval_batch_size", 1)
         final_samples = getattr(args, "final_eval_samples", 0)
-        final_batches = (final_samples // args.batch_size) if final_samples > 0 else len(self.val_loader)
-        print(f"Running final eval on {final_batches} batches ({final_batches * args.batch_size} samples)...")
+        final_batches = (final_samples // ebs) if final_samples > 0 else len(self.val_loader)
+        print(f"Running final eval on {final_batches} batches ({final_batches * ebs} samples)...")
         final_loss    = run_val_loss(self.model, self.val_loader, self.device, final_batches)
         final_bleu    = run_bleu_eval(self.model, self.val_loader, self.device, final_batches)
         print_metrics({**final_loss, **final_bleu}, prefix="final")
