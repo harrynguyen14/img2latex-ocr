@@ -31,10 +31,14 @@ def _stream_parquet(files: list[Path], rng: random.Random) -> Iterator[str]:
 
 
 def _get_pools(cfg: DecoderConfig, seed: int) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+    base = Path(cfg.data_dir)
+    # support both data_dir/raw/ and data_dir/train/raw/
+    if (base / "train" / "raw").exists():
+        base = base / "train"
     sources = {
-        "raw":        (Path(cfg.data_dir) / "train" / "raw",        cfg.raw_ratio),
-        "light_text": (Path(cfg.data_dir) / "train" / "light_text", cfg.light_ratio),
-        "heavy_text": (Path(cfg.data_dir) / "train" / "heavy_text", cfg.heavy_ratio),
+        "raw":        (base / "raw",        cfg.raw_ratio),
+        "light_text": (base / "light_text", cfg.light_ratio),
+        "heavy_text": (base / "heavy_text", cfg.heavy_ratio),
     }
     train_pools, val_pools = {}, {}
     for name, (path, ratio) in sources.items():
