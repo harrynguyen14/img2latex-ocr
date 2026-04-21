@@ -20,8 +20,8 @@ class DecoderConfig:
     tie_weights:      bool  = True
 
     pack_sequences:   bool  = True
-    batch_size:       int   = 64
-    grad_accum_steps: int   = 8
+    batch_size:       int   = 128
+    grad_accum_steps: int   = 4
 
     lr:               float = 3e-4
     weight_decay:     float = 0.1
@@ -40,8 +40,8 @@ class DecoderConfig:
     keep_last_n_ckpt:        int   = 3
     log_every_steps:         int   = 100
     early_stopping_patience: int   = 10
-    num_workers:             int   = 2
-    compile:                 bool  = False
+    num_workers:             int   = 4
+    compile:                 bool  = True
 
     tokenizer_dir:    str   = "D:/img2latex/tokenizer"
     out_dir:          str   = "D:/img2latex/pretrain_decoder/checkpoints"
