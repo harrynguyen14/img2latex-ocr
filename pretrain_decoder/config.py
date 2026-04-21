@@ -51,8 +51,8 @@ class DecoderConfig:
     light_ratio:      float = 0.70
     heavy_ratio:      float = 0.30
 
-    raw_weight:       float = 1.0
-    light_weight:     float = 1.0
+    raw_weight:       float = 2.0
+    light_weight:     float = 4.0
     heavy_weight:     float = 1.0
 
     @property

@@ -255,7 +255,8 @@ class LaTeXTokenizerV2:
 
     @classmethod
     def load(cls, out_dir: str | Path) -> "LaTeXTokenizerV2":
-        path = Path(out_dir) / "tokenizer_v2.json"
+        out_dir = Path(out_dir)
+        path = out_dir / "tokenizer_v2.json" if (out_dir / "tokenizer_v2.json").exists() else out_dir / "tokenizer.json"
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls(
