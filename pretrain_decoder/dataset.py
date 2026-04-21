@@ -5,7 +5,10 @@ from typing import Iterator
 import torch
 from torch.utils.data import IterableDataset, DataLoader
 import pyarrow.parquet as pq
-from tokenizers import Tokenizer
+
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "tokenizer_v2"))
+from tokenizer_v2 import LaTeXTokenizerV2 as LaTeXTokenizer
 
 from config import DecoderConfig
 
@@ -62,7 +65,7 @@ def _interleaved_stream(
 
 
 class PretrainDataset(IterableDataset):
-    def __init__(self, tokenizer: Tokenizer, cfg: DecoderConfig, seed: int = 42, split: str = "train"):
+    def __init__(self, tokenizer: LaTeXTokenizer, cfg: DecoderConfig, seed: int = 42, split: str = "train"):
         super().__init__()
         self.tokenizer = tokenizer
         self.cfg       = cfg
@@ -92,7 +95,7 @@ class PretrainDataset(IterableDataset):
 
         current: list[int] = []
         for text in stream:
-            ids = self.tokenizer.encode(text).ids
+            ids = self.tokenizer.encode(text)
             if len(ids) > self.cfg.max_seq_len:
                 ids = ids[:self.cfg.max_seq_len]
             if not ids:

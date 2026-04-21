@@ -1,5 +1,6 @@
 {
-  "vocab_size": 8192,
+  "vocab_size": 2046,
+  "n_frozen": 697,
   "special_tokens": [
     "<pad>",
     "<unk>",
@@ -14,9 +15,9 @@
   "unk_id": 1,
   "bos_id": 2,
   "eos_id": 3,
-  "min_frequency": 2,
-  "model_max_length": 128,
+  "model_max_length": 256,
   "padding_side": "right",
   "truncation_side": "right",
+  "tokenizer_version": 2,
   "tokenizer_class": "PreTrainedTokenizerFast"
 }

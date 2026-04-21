@@ -5,7 +5,7 @@ from pathlib import Path
 
 @dataclass
 class DecoderConfig:
-    vocab_size:       int   = 8192
+    vocab_size:       int   = 2046
     pad_id:           int   = 0
     bos_id:           int   = 2
     eos_id:           int   = 3

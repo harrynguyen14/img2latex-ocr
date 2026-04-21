@@ -1,7 +1,7 @@
 import json
 import math
+import shutil
 import sys
-import time
 from pathlib import Path
 
 import torch
@@ -18,8 +18,7 @@ except ImportError:
 
 from config import DecoderConfig
 from model import LaTeXDecoder
-from dataset import PretrainDataset, build_dataloader
-from tokenizer import load_tokenizer
+from dataset import PretrainDataset, build_dataloader, LaTeXTokenizer
 
 
 def cosine_with_warmup(optimizer: AdamW, warmup_steps: int, max_steps: int, min_lr_ratio: float = 0.1) -> LambdaLR:
@@ -48,29 +47,68 @@ def _make_optimizer(model: LaTeXDecoder, cfg: DecoderConfig) -> AdamW:
     )
 
 
-def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_n):
+def save_checkpoint(model, optimizer, scheduler, step, loss, out_dir, keep_last_n, tok_dir=None):
     ckpt_dir = out_dir / f"step_{step:07d}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # always save raw model weights (unwrap torch.compile if needed)
     raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
-    if HAS_SAFETENSORS:
-        save_model(raw_model, str(ckpt_dir / "model.safetensors"))
-    else:
-        torch.save(raw_model.state_dict(), str(ckpt_dir / "model.pt"))
+    if not HAS_SAFETENSORS:
+        raise RuntimeError("safetensors is required. Install with: pip install safetensors")
+    save_model(raw_model, str(ckpt_dir / "model.safetensors"))
 
     torch.save(
         {"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "loss": loss},
         str(ckpt_dir / "trainer.pt"),
     )
+
+    # embed weights info for cross-architecture loading
+    embed_info = {
+        "vocab_size":   raw_model.cfg.vocab_size,
+        "embed_dim":    raw_model.cfg.d_model,
+        "pad_id":       raw_model.cfg.pad_id,
+        "bos_id":       raw_model.cfg.bos_id,
+        "eos_id":       raw_model.cfg.eos_id,
+        "tie_weights":  raw_model.cfg.tie_weights,
+        "embed_norm":   round(raw_model.embed_tokens.weight.norm().item(), 6),
+    }
+
+    arch_info = {
+        "d_model":      raw_model.cfg.d_model,
+        "n_heads":      raw_model.cfg.n_heads,
+        "head_dim":     raw_model.cfg.head_dim,
+        "n_layers":     raw_model.cfg.n_layers,
+        "d_ff":         raw_model.cfg.d_ff,
+        "max_seq_len":  raw_model.cfg.max_seq_len,
+        "rope_theta":   raw_model.cfg.rope_theta,
+        "has_cross_attention": False,
+    }
+
+    # copy tokenizer files into checkpoint for self-contained loading
+    if tok_dir is not None:
+        tok_src = Path(tok_dir)
+        tok_dst = ckpt_dir / "tokenizer"
+        tok_dst.mkdir(exist_ok=True)
+        for fname in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
+            src = tok_src / fname
+            if src.exists():
+                shutil.copy2(src, tok_dst / fname)
+
     with open(ckpt_dir / "train_info.json", "w") as f:
-        json.dump({"step": step, "loss": round(loss, 6)}, f)
+        json.dump({
+            "step":      step,
+            "loss":      round(loss, 6),
+            "embed":     embed_info,
+            "arch":      arch_info,
+        }, f, indent=2)
 
     all_ckpts = sorted(out_dir.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
     while len(all_ckpts) > keep_last_n:
         old = all_ckpts.pop(0)
         for fi in old.iterdir():
-            fi.unlink()
+            if fi.is_dir():
+                shutil.rmtree(fi)
+            else:
+                fi.unlink()
         old.rmdir()
 
 
@@ -160,7 +198,7 @@ def train(cfg: DecoderConfig, resume: bool = True):
 
     print(f"device={device}  amp_dtype={amp_dtype}")
 
-    tok          = load_tokenizer(cfg.tokenizer_dir)
+    tok          = LaTeXTokenizer.load(cfg.tokenizer_dir)
     train_ds     = PretrainDataset(tok, cfg, split="train")
     train_loader = build_dataloader(train_ds, cfg.batch_size, num_workers=cfg.num_workers)
     val_loaders  = {
@@ -267,7 +305,7 @@ def train(cfg: DecoderConfig, resume: bool = True):
             if avg_val_ppl < best_val_ppl:
                 best_val_ppl     = avg_val_ppl
                 no_improve_count = 0
-                save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, cfg.keep_last_n_ckpt)
+                save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, cfg.keep_last_n_ckpt, tok_dir=cfg.tokenizer_dir)
                 tqdm.write(f"  [best] avg_val_ppl={avg_val_ppl:.2f} — checkpoint saved")
                 do_save = False
             else:
@@ -304,12 +342,12 @@ def train(cfg: DecoderConfig, resume: bool = True):
             tqdm.write(str(logs))
 
         if do_save:
-            save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, cfg.keep_last_n_ckpt)
+            save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, cfg.keep_last_n_ckpt, tok_dir=cfg.tokenizer_dir)
             if not do_log:
                 tqdm.write(f"  checkpoint saved at step {step}")
 
     pbar.close()
     if not early_stop:
-        save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, 999)
+        save_checkpoint(model, optimizer, scheduler, step, accum_loss, out_dir, 999, tok_dir=cfg.tokenizer_dir)
     print(f"Training done at step {step}. Best val_ppl={best_val_ppl:.2f}")
     return model

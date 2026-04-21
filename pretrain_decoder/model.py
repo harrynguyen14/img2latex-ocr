@@ -4,7 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
-from config import DecoderConfig
+try:
+    from pretrain_decoder.config import DecoderConfig
+except ImportError:
+    from config import DecoderConfig
 
 
 class RMSNorm(nn.Module):
