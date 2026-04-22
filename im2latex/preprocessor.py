@@ -16,7 +16,7 @@ from tokenizer_v2 import LaTeXTokenizerV2
 
 
 def get_tokenizer(repo_id: str):
-    path = hf_hub_download(repo_id=repo_id, filename="tokenizer_v2.json")
+    path = hf_hub_download(repo_id=repo_id, filename="tokenizer/tokenizer.json")
     with open(path) as f:
         data = json.load(f)
     return LaTeXTokenizerV2(
