@@ -183,31 +183,28 @@ class LaTeXOCRFlatParquetDataset(IterableDataset):
 
     def __iter__(self):
         import random
+        import pyarrow.parquet as pq
         worker_info = torch.utils.data.get_worker_info()
         worker_id   = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
         rng = random.Random(self.seed + worker_id + self.rank * 1000)
 
-        import pyarrow.parquet as pq
         global_idx = 0
         for pfile in self.files:
-            table   = pq.read_table(str(pfile), columns=["image", "latex"])
-            indices = list(range(len(table)))
-            rng.shuffle(indices)
-            images = table["image"].to_pylist()
-            latexs = table["latex"].to_pylist()
-            for i in indices:
-                if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
-                    img_raw = images[i]
-                    lat     = latexs[i]
-                    if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
-                        global_idx += 1
-                        continue
-                    try:
-                        yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
-                    except Exception:
-                        pass
-                global_idx += 1
+            pf = pq.ParquetFile(str(pfile))
+            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
+                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
+                rng.shuffle(rows)
+                for img_raw, lat in rows:
+                    if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
+                        if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
+                            global_idx += 1
+                            continue
+                        try:
+                            yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
+                        except Exception:
+                            pass
+                    global_idx += 1
 
 
 class LaTeXOCRParquetDataset(IterableDataset):
@@ -258,27 +255,31 @@ class LaTeXOCRParquetDataset(IterableDataset):
                     yield {"image": img_raw, "latex": lat.strip()}
 
     def __iter__(self):
-        import pyarrow.parquet as pq
         import random
         worker_info = torch.utils.data.get_worker_info()
         worker_id   = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
         rng = random.Random(self.seed + worker_id + self.rank * 1000)
 
+        iters  = {src: self._stream_source(files, rng) for src, files in self.source_files.items()}
+        active = set(iters.keys())
+        names  = list(iters.keys())
+
         global_idx = 0
-        for pfile in self.files:
-            pf = pq.ParquetFile(str(pfile))
-            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
-                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
-                rng.shuffle(rows)
-                for img_raw, lat in rows:
-                    if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
-                        if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
-                            global_idx += 1
-                            continue
-                        try:
-                            yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
-                        except Exception:
-                            pass
-                    global_idx += 1
+        while active:
+            avail   = [s for s in names if s in active]
+            w_avail = [self.weights[s] for s in avail]
+            chosen  = rng.choices(avail, weights=w_avail, k=1)[0]
+            try:
+                sample = next(iters[chosen])
+            except StopIteration:
+                active.discard(chosen)
+                continue
+
+            if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
+                try:
+                    yield _process(sample, self.tokenizer, self.args)
+                except Exception:
+                    pass
+            global_idx += 1
         
