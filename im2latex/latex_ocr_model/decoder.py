@@ -23,6 +23,7 @@ class CustomDecoder(nn.Module):
             self._enable_qat()
 
     def _enable_qat(self):
+        self._model.train()  
         self._model.qconfig = torch.ao.quantization.get_default_qat_qconfig("fbgemm")
         torch.ao.quantization.prepare_qat(self._model, inplace=True)
         print("  [decoder] QAT enabled (fake-quantize on all Linear layers)")
