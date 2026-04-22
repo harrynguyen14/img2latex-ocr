@@ -245,23 +245,38 @@ class Trainer:
         opt_pt = resume_dir / "optimizer.pt"
         if opt_pt.exists():
             ts = torch.load(str(opt_pt), map_location="cpu")
-            opt_state = ts["optimizer"]
+            
+            # CHỖ SỬA 1: Lấy đúng dictionary của optimizer
+            # Vì file của bạn có cấu trúc {'optimizer': {...}, 'step': ...}
+            opt_state = ts.get("optimizer", ts) 
+            
+            self.global_step = ts.get("step", 0)
+            
             device = next(self.model.parameters()).device
             for s in opt_state["state"].values():
                 for k, v in s.items():
                     if isinstance(v, torch.Tensor):
                         s[k] = v.to(device)
-            self.optimizer.load_state_dict(opt_state)
-            self.global_step = ts.get("step", 0)
-            print(f"[resume] optimizer loaded, step={self.global_step}")
+            
+            # CHỖ SỬA 2: Bọc try-except để tránh văng khi mismatch size
+            try:
+                self.optimizer.load_state_dict(opt_state)
+                print(f"[resume] optimizer loaded, step={self.global_step}")
+            except ValueError as e:
+                print(f"[resume] WARNING: Optimizer mismatch ({e}). Using fresh optimizer.")
+            except Exception as e:
+                print(f"[resume] WARNING: Could not load optimizer: {e}")
 
         sched_pt = resume_dir / "scheduler.pt"
         if sched_pt.exists():
             ts = torch.load(str(sched_pt), map_location="cpu")
-            self.scheduler.load_state_dict(ts["scheduler"])
-            if self.global_step == 0:
-                self.global_step = ts.get("step", 0)
-            print(f"[resume] scheduler loaded")
+            # Tương tự, lấy đúng key scheduler
+            sched_state = ts.get("scheduler", ts)
+            try:
+                self.scheduler.load_state_dict(sched_state)
+                print(f"[resume] scheduler loaded")
+            except:
+                print(f"[resume] WARNING: Scheduler mismatch. Skipping.")
 
     def _forward_loss(self, batch) -> torch.Tensor:
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,
