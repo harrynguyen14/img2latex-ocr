@@ -8,11 +8,12 @@ from PIL import Image
 from torch.utils.data import IterableDataset
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from pretrain_decoder.tokenizer import load_tokenizer as _load_tokenizer
+sys.path.insert(0, str(Path(__file__).parent.parent / "tokenizer_v2"))
+from tokenizer_v2 import LaTeXTokenizerV2
 
 
-def get_tokenizer(tokenizer_dir: str):
-    return _load_tokenizer(tokenizer_dir)
+def get_tokenizer(tokenizer_dir: str) -> LaTeXTokenizerV2:
+    return LaTeXTokenizerV2.load(tokenizer_dir)
 
 
 def _resize(img: Image.Image, image_height: int, max_image_width: int, patch_size: int) -> Image.Image:
