@@ -5,7 +5,7 @@ import random
 import numpy as np
 import torch
 
-from .utils import collate_fn, configure_runtime, setup_distributed
+from .utils import collate_fn, configure_runtime
 from .build_datasets import build_datasets, build_dataloader
 from .preprocessor import get_tokenizer
 from .trainer import Trainer
@@ -76,16 +76,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    distributed = "LOCAL_RANK" in os.environ
-    if distributed:
-        rank, local_rank, world_size = setup_distributed()
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        rank, local_rank, world_size = 0, 0, 1
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    seed = args.seed + rank
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -96,7 +89,7 @@ def main():
 
     tokenizer = get_tokenizer("harryrobert/pretrain-decoder")
     data_source = args.data_path.strip() or args.dataset_id
-    train_ds, val_ds = build_datasets(args, data_source, rank, world_size, tokenizer)
+    train_ds, val_ds = build_datasets(args, data_source, tokenizer)
 
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
@@ -104,7 +97,7 @@ def main():
     train_loader = build_dataloader(train_ds, args.batch_size,      nw, collate_fn, device.type == "cuda", prefetch, persistent)
     val_loader   = build_dataloader(val_ds,   args.eval_batch_size, nw, collate_fn, device.type == "cuda", prefetch, persistent)
 
-    trainer = Trainer(args, train_loader, val_loader, device, tokenizer, distributed, rank, local_rank, world_size)
+    trainer = Trainer(args, train_loader, val_loader, device, tokenizer)
     trainer.train()
 
 

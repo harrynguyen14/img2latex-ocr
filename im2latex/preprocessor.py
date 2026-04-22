@@ -82,7 +82,7 @@ def _process(sample: dict, tokenizer, args) -> dict:
         )
     tensor = _to_tensor(img)
     label = sample.get("latex") or sample.get("label") or ""
-    ids = tokenizer.encode(label).ids
+    ids = tokenizer.encode(label)
     if len(ids) > args.max_token_len:
         ids = ids[:args.max_token_len]
     pad_len        = args.max_token_len - len(ids)
@@ -160,11 +160,6 @@ class LaTeXOCRDiskDataset(IterableDataset):
 
 
 class LaTeXOCRFlatParquetDataset(IterableDataset):
-    """Stream image+latex from a flat directory of parquet files (e.g. validation/).
-
-    No subfolders, no weighted interleaving — just stream all files sequentially.
-    """
-
     def __init__(
         self,
         val_dir: str,
@@ -191,28 +186,26 @@ class LaTeXOCRFlatParquetDataset(IterableDataset):
 
         global_idx = 0
         for pfile in self.files:
-            pf = pq.ParquetFile(str(pfile))
-            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
-                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
-                rng.shuffle(rows)
-                for img_raw, lat in rows:
-                    if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
-                        if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
-                            global_idx += 1
-                            continue
-                        try:
-                            yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
-                        except Exception:
-                            pass
-                    global_idx += 1
+            table = pq.read_table(str(pfile), columns=["image", "latex"])
+            indices = list(range(len(table)))
+            rng.shuffle(indices)
+            images = table["image"].to_pylist()
+            latexs = table["latex"].to_pylist()
+            for i in indices:
+                if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
+                    img_raw = images[i]
+                    lat = latexs[i]
+                    if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
+                        global_idx += 1
+                        continue
+                    try:
+                        yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
+                    except Exception:
+                        pass
+                global_idx += 1
 
 
 class LaTeXOCRParquetDataset(IterableDataset):
-    """Stream image+latex pairs directly from local parquet files.
-
-    Expects layout: data_dir/{src}/*.parquet  (harryrobert/ocr-latex-filter format)
-    Columns: image (bytes), latex (str), source, idx
-    """
 
     def __init__(
         self,
@@ -240,19 +233,22 @@ class LaTeXOCRParquetDataset(IterableDataset):
                 self.source_files[src] = files
                 self.weights[src] = w
 
-    def _stream_source(self, files: list[Path], rng) -> "Iterator[dict]":
+    def _stream_source(self, files: list[Path], rng):
         import pyarrow.parquet as pq
         for pfile in files:
-            pf = pq.ParquetFile(str(pfile))
-            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
-                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
-                rng.shuffle(rows)
-                for img_raw, lat in rows:
-                    if not lat or not isinstance(lat, str) or not lat.strip():
-                        continue
-                    if img_raw is None:
-                        continue
-                    yield {"image": img_raw, "latex": lat.strip()}
+            table = pq.read_table(str(pfile), columns=["image", "latex"])
+            indices = list(range(len(table)))
+            rng.shuffle(indices)
+            images = table["image"].to_pylist()
+            latexs = table["latex"].to_pylist()
+            for i in indices:
+                img_raw = images[i]
+                lat = latexs[i]
+                if not lat or not isinstance(lat, str) or not lat.strip():
+                    continue
+                if img_raw is None:
+                    continue
+                yield {"image": img_raw, "latex": lat.strip()}
 
     def __iter__(self):
         import random
@@ -276,7 +272,7 @@ class LaTeXOCRParquetDataset(IterableDataset):
                 active.discard(chosen)
                 continue
 
-            if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
+            if global_idx % num_workers == worker_id:
                 try:
                     yield _process(sample, self.tokenizer, self.args)
                 except Exception:

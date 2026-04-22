@@ -183,8 +183,7 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
 
 
 class Trainer:
-    def __init__(self, args, train_loader, val_loader, device, tokenizer,
-                 distributed=False, rank=0, local_rank=0, world_size=1):
+    def __init__(self, args, train_loader, val_loader, device, tokenizer):
         self.args         = args
         self.device       = device
         self.tokenizer    = tokenizer
@@ -228,14 +227,10 @@ class Trainer:
 
     def _load_resume(self, resume_dir: Path):
         sf = resume_dir / "model.safetensors"
-        pt = resume_dir / "model.pt"
-        if sf.exists():
-            state = st_load_file(str(sf))
-        elif pt.exists():
-            state = torch.load(str(pt), map_location="cpu")
-        else:
+        if not sf.exists():
             print(f"[resume] No model file in {resume_dir}")
             return
+        state = st_load_file(str(sf))
 
         ve_state = {k[len("visual_encoder."):]: v for k, v in state.items() if k.startswith("visual_encoder.")}
         if ve_state:

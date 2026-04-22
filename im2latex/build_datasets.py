@@ -12,7 +12,7 @@ _DEFAULT_SOURCES = ["raw", "light", "heavy"]
 _DEFAULT_WEIGHTS = [1.0, 1.0, 1.0]
 
 
-def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer):
+def build_datasets(args, data_source: str, tokenizer):
     data_path = getattr(args, "data_path", "").strip()
 
     # Local layout: data_path/train/{raw,light,heavy}/ + data_path/validation/
@@ -26,13 +26,11 @@ def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer
 
             train_ds = LaTeXOCRParquetDataset(
                 str(train_dir), sources, weights, tokenizer, args,
-                rank=rank, world_size=world_size,
             )
 
             if val_dir.exists():
                 val_ds = LaTeXOCRFlatParquetDataset(
                     str(val_dir), tokenizer, args,
-                    rank=rank, world_size=world_size,
                 )
                 print(f"[dataset] train={train_dir}  val={val_dir}")
             else:
@@ -49,10 +47,8 @@ def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer
     print(f"[dataset] HF streaming → {data_source}  sources={sources}")
     return (
         LaTeXOCRHFDataset(data_source, "train", tokenizer, args,
-                          rank=rank, world_size=world_size,
                           names=sources, weights=weights),
-        LaTeXOCRHFDataset(data_source, "validation", tokenizer, args,
-                          rank=rank, world_size=world_size),
+        LaTeXOCRHFDataset(data_source, "validation", tokenizer, args,),
     )
 
 

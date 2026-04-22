@@ -1,7 +1,6 @@
 import os
 import torch
 from typing import Any
-import torch.distributed as dist
 
 
 def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
@@ -11,20 +10,6 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
         "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
         "labels": torch.stack([item["labels"] for item in batch]),
     }
-
-
-def setup_distributed():
-    import datetime
-    local_rank = int(os.environ["LOCAL_RANK"])
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=60))
-    torch.cuda.set_device(local_rank)
-    return dist.get_rank(), local_rank, dist.get_world_size()
-
-
-def cleanup_distributed():
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
 
 
 def move_batch(batch, device):
