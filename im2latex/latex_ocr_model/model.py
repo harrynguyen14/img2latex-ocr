@@ -33,7 +33,7 @@ class VisualEncoder(nn.Module):
 
 
 class LaTeXOCRModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, tokenizer=None):
         super().__init__()
         if not isinstance(config, dict):
             config = vars(config)
@@ -61,7 +61,7 @@ class LaTeXOCRModel(nn.Module):
             ),
             max_visual_tokens=config["max_visual_tokens"],
         )
-        self.decoder   = CustomDecoder(config)
+        self.decoder = CustomDecoder(config, tokenizer=tokenizer)
         self.tokenizer = self.decoder.tokenizer
         if config["navit_dim"] != config["vision_hidden_size"]:
             raise ValueError("navit_dim must equal vision_hidden_size for the projector")

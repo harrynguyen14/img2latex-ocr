@@ -6,14 +6,24 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import IterableDataset
+from huggingface_hub import hf_hub_download
+import json
+from typing import Iterator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "tokenizer_v2"))
 from tokenizer_v2 import LaTeXTokenizerV2
 
 
-def get_tokenizer(tokenizer_dir: str) -> LaTeXTokenizerV2:
-    return LaTeXTokenizerV2.load(tokenizer_dir)
+def get_tokenizer(repo_id: str):
+    path = hf_hub_download(repo_id=repo_id, filename="tokenizer.json")
+    with open(path) as f:
+        data = json.load(f)
+    return LaTeXTokenizerV2(
+        token2id=data["token2id"],
+        id2token={int(k): v for k, v in data["id2token"].items()},
+        merges=[tuple(m) for m in data["merges"]],
+    )
 
 
 def _resize(img: Image.Image, image_height: int, max_image_width: int, patch_size: int) -> Image.Image:
@@ -218,7 +228,6 @@ class LaTeXOCRParquetDataset(IterableDataset):
         world_size: int = 1,
         seed: int = 42,
     ):
-        import random
         self.data_dir   = Path(data_dir)
         self.tokenizer  = tokenizer
         self.args       = args
@@ -235,52 +244,41 @@ class LaTeXOCRParquetDataset(IterableDataset):
                 self.weights[src] = w
 
     def _stream_source(self, files: list[Path], rng) -> "Iterator[dict]":
-        import random
+        import pyarrow.parquet as pq
         for pfile in files:
-            import pyarrow.parquet as pq
-            table = pq.read_table(str(pfile), columns=["image", "latex"])
-            indices = list(range(len(table)))
-            rng.shuffle(indices)
-            images = table["image"].to_pylist()
-            latexs = table["latex"].to_pylist()
-            for i in indices:
-                img_raw = images[i]
-                lat     = latexs[i]
-                if not lat or not isinstance(lat, str) or not lat.strip():
-                    continue
-                if img_raw is None:
-                    continue
-                yield {"image": img_raw, "latex": lat.strip()}
+            pf = pq.ParquetFile(str(pfile))
+            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
+                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
+                rng.shuffle(rows)
+                for img_raw, lat in rows:
+                    if not lat or not isinstance(lat, str) or not lat.strip():
+                        continue
+                    if img_raw is None:
+                        continue
+                    yield {"image": img_raw, "latex": lat.strip()}
 
     def __iter__(self):
+        import pyarrow.parquet as pq
         import random
         worker_info = torch.utils.data.get_worker_info()
         worker_id   = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
         rng = random.Random(self.seed + worker_id + self.rank * 1000)
 
-        iters  = {src: self._stream_source(files, rng) for src, files in self.source_files.items()}
-        active = set(iters.keys())
-        names  = list(iters.keys())
-        ws     = [self.weights[s] for s in names]
-
         global_idx = 0
-        while active:
-            avail = [s for s in names if s in active]
-            if not avail:
-                break
-            w_avail = [self.weights[s] for s in avail]
-            chosen  = rng.choices(avail, weights=w_avail, k=1)[0]
-            try:
-                sample = next(iters[chosen])
-            except StopIteration:
-                active.discard(chosen)
-                continue
-
-            # shard across workers and DDP ranks
-            if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
-                try:
-                    yield _process(sample, self.tokenizer, self.args)
-                except Exception:
-                    pass
-            global_idx += 1
+        for pfile in self.files:
+            pf = pq.ParquetFile(str(pfile))
+            for batch in pf.iter_batches(batch_size=256, columns=["image", "latex"]):
+                rows = list(zip(batch["image"].to_pylist(), batch["latex"].to_pylist()))
+                rng.shuffle(rows)
+                for img_raw, lat in rows:
+                    if global_idx % (num_workers * self.world_size) == (worker_id * self.world_size + self.rank):
+                        if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
+                            global_idx += 1
+                            continue
+                        try:
+                            yield _process({"image": img_raw, "latex": lat.strip()}, self.tokenizer, self.args)
+                        except Exception:
+                            pass
+                    global_idx += 1
+        

@@ -94,7 +94,7 @@ def main():
 
     configure_runtime(args, device)
 
-    tokenizer   = get_tokenizer(args.tokenizer_dir)
+    tokenizer = get_tokenizer("harryrobert/pretrain-decoder")
     data_source = args.data_path.strip() or args.dataset_id
     train_ds, val_ds = build_datasets(args, data_source, rank, world_size, tokenizer)
 

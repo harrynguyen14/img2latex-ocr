@@ -7,7 +7,7 @@ from tokenizer_v2 import LaTeXTokenizerV2
 
 
 class CustomDecoder(nn.Module):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, tokenizer=None):
         super().__init__()
         repo = config.get("decoder_ckpt", "harryrobert/pretrain-decoder")
         self._model = AutoModelForCausalLM.from_pretrained(repo, trust_remote_code=True)
@@ -17,7 +17,7 @@ class CustomDecoder(nn.Module):
         self.eos_token_id = self._model.config.eos_id
         self._vocab_size  = self._model.config.vocab_size
         self._pad_id      = self._model.config.pad_id
-        self.tokenizer    = LaTeXTokenizerV2.load(config["tokenizer_dir"])
+        self.tokenizer    = tokenizer
 
         if config.get("qat", False):
             self._enable_qat()

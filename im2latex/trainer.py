@@ -198,7 +198,7 @@ class Trainer:
         self.best_val_ppl       = float("inf")
         self.decoder_warmup_steps = args.decoder_warmup_steps
 
-        self.model = LaTeXOCRModel(vars(args) if not isinstance(args, dict) else args).to(device)
+        self.model = LaTeXOCRModel(vars(args) if not isinstance(args, dict) else args, tokenizer=tokenizer).to(device)
 
         if device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -267,21 +267,6 @@ class Trainer:
             if self.global_step == 0:
                 self.global_step = ts.get("step", 0)
             print(f"[resume] scheduler loaded")
-
-        # legacy trainer.pt fallback
-        trainer_pt = resume_dir / "trainer.pt"
-        if trainer_pt.exists() and not opt_pt.exists():
-            ts = torch.load(str(trainer_pt), map_location="cpu")
-            opt_state = ts["optimizer"]
-            device = next(self.model.parameters()).device
-            for s in opt_state["state"].values():
-                for k, v in s.items():
-                    if isinstance(v, torch.Tensor):
-                        s[k] = v.to(device)
-            self.optimizer.load_state_dict(opt_state)
-            self.scheduler.load_state_dict(ts["scheduler"])
-            self.global_step = ts.get("step", 0)
-            print(f"[resume] legacy trainer.pt loaded, step={self.global_step}")
 
     def _forward_loss(self, batch) -> torch.Tensor:
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,
