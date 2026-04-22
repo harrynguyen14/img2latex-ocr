@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from transformers import AutoModelForCausalLM
-from tokenizer_v2.tokenizer_v2 import LaTeXTokenizerV2
+from tokenizer_v2 import LaTeXTokenizerV2
 
 
 class CustomDecoder(nn.Module):
