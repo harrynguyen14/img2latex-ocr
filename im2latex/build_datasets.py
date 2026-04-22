@@ -3,7 +3,10 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from .preprocessor import LaTeXOCRHFDataset, LaTeXOCRParquetDataset, LaTeXOCRFlatParquetDataset
 
-DISK_CACHE_DIR = "/kaggle/working/cache"
+# Repo layout (harryrobert/ocr-latex-filter):
+#   train/{raw,light,heavy}/*.parquet
+#   validation/*.parquet
+#   test/*.parquet
 
 _DEFAULT_SOURCES = ["raw", "light", "heavy"]
 _DEFAULT_WEIGHTS = [1.0, 1.0, 1.0]
@@ -12,7 +15,7 @@ _DEFAULT_WEIGHTS = [1.0, 1.0, 1.0]
 def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer):
     data_path = getattr(args, "data_path", "").strip()
 
-    # Local parquet layout: data_path/train/{raw,light,heavy}/ + data_path/validation/
+    # Local layout: data_path/train/{raw,light,heavy}/ + data_path/validation/
     if data_path and Path(data_path).exists():
         train_dir = Path(data_path) / "train"
         val_dir   = Path(data_path) / "validation"
@@ -24,7 +27,6 @@ def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer
             train_ds = LaTeXOCRParquetDataset(
                 str(train_dir), sources, weights, tokenizer, args,
                 rank=rank, world_size=world_size,
-                val_files=0, is_val=False,
             )
 
             if val_dir.exists():
@@ -34,20 +36,17 @@ def build_datasets(args, data_source: str, rank: int, world_size: int, tokenizer
                 )
                 print(f"[dataset] train={train_dir}  val={val_dir}")
             else:
-                # fallback: split last few files from train as val
-                val_ds = LaTeXOCRParquetDataset(
-                    str(train_dir), sources, [1.0] * len(sources), tokenizer, args,
-                    rank=rank, world_size=world_size,
-                    val_files=3, is_val=True,
+                raise FileNotFoundError(
+                    f"validation/ not found under {data_path}. "
+                    f"Download the full repo: huggingface-cli download harryrobert/ocr-latex-filter --repo-type dataset --local-dir {data_path}"
                 )
-                print(f"[dataset] train={train_dir}  val=split-from-train")
 
             return train_ds, val_ds
 
-    # HF streaming fallback
+    # HF streaming fallback (harryrobert/ocr-latex-filter)
     sources = getattr(args, "sources", _DEFAULT_SOURCES)
     weights = getattr(args, "weights", _DEFAULT_WEIGHTS)
-    print(f"[dataset] HF streaming → {data_source}  names={sources}")
+    print(f"[dataset] HF streaming → {data_source}  sources={sources}")
     return (
         LaTeXOCRHFDataset(data_source, "train", tokenizer, args,
                           rank=rank, world_size=world_size,

@@ -48,7 +48,6 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float) -> Ada
 
 
 def _verify_safetensors(path: Path, expected_keys: set) -> bool:
-    """Verify model.safetensors has correct header and all expected weight keys."""
     if not path.exists():
         return False
     try:
@@ -77,7 +76,6 @@ def _save_checkpoint(
 ):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- model.safetensors: visual_encoder + decoder weights ---
     state = {
         f"visual_encoder.{k}": v.contiguous().cpu()
         for k, v in model.visual_encoder.state_dict().items()
@@ -100,25 +98,15 @@ def _save_checkpoint(
         torch.save(state, ckpt_dir / "model.pt")
         tqdm.write("[ckpt] safetensors not available, saved model.pt")
 
-    # --- optimizer.pt ---
     torch.save({"optimizer": optimizer.state_dict(), "step": step}, ckpt_dir / "optimizer.pt")
-
-    # --- scheduler.pt ---
     torch.save({"scheduler": scheduler.state_dict(), "step": step}, ckpt_dir / "scheduler.pt")
 
-    # --- trainer_state.json ---
-    trainer_state = {
-        "global_step": step,
-        "best_val_ppl": getattr(model, "_best_val_ppl", None),
-    }
     with open(ckpt_dir / "trainer_state.json", "w", encoding="utf-8") as f:
-        json.dump(trainer_state, f, indent=2)
+        json.dump({"global_step": step, "best_val_ppl": getattr(model, "_best_val_ppl", None)}, f, indent=2)
 
-    # --- config.json ---
     with open(ckpt_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(model.config, f, indent=2, ensure_ascii=False)
 
-    # --- tokenizer files ---
     if tokenizer_dir is not None:
         tokenizer_dir = Path(tokenizer_dir)
         for fname in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
@@ -126,7 +114,6 @@ def _save_checkpoint(
             if src.exists():
                 shutil.copy2(src, ckpt_dir / fname)
 
-    # --- rotate old step_* checkpoints ---
     parent = ckpt_dir.parent
     all_ckpts = sorted(parent.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
     while len(all_ckpts) > keep_last_n:
@@ -138,7 +125,6 @@ def _save_checkpoint(
 
 @torch.no_grad()
 def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict:
-    """Fast validation: CE loss only, no generation."""
     model.eval()
     total_loss, total_batches = 0.0, 0
     amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16,
@@ -154,7 +140,7 @@ def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict
                 batch["attention_mask"],
                 batch["labels"],
             )
-        total_loss   += out.loss.item()
+        total_loss    += out.loss.item()
         total_batches += 1
     model.train()
     if total_batches == 0:
@@ -169,10 +155,10 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
     preds, refs = [], []
 
     model_tok = model.tokenizer
-    pad_id = model.decoder.pad_token_id
-    eos_id = model.decoder.eos_token_id
-    bos_id = model_tok.token_to_id("<bos>")
-    skip_ids = {-100, pad_id, eos_id}
+    pad_id    = model.decoder.pad_token_id
+    eos_id    = model.decoder.eos_token_id
+    bos_id    = model_tok.token_to_id("<bos>")
+    skip_ids  = {pad_id, eos_id}
     if bos_id is not None:
         skip_ids.add(bos_id)
 
@@ -184,7 +170,9 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
         preds.extend(gen)
 
         for ids in batch["labels"].cpu().tolist():
-            refs.append(decode_ids(model_tok, ids, skip_ids=skip_ids))
+            # filter out -100 (label padding) before decoding
+            valid_ids = [x for x in ids if x >= 0]
+            refs.append(decode_ids(model_tok, valid_ids, skip_ids=skip_ids))
 
     model.train()
 
@@ -205,15 +193,13 @@ class Trainer:
         self.ckpt_dir     = Path(args.ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        warmup_steps     = max(1, int(args.max_steps * args.warmup_ratio))
-        self.total_steps = args.max_steps
-        self.global_step = 0
-        self.best_val_ppl = float("inf")
+        self.total_steps        = args.max_steps
+        self.global_step        = 0
+        self.best_val_ppl       = float("inf")
+        self.decoder_warmup_steps = args.decoder_warmup_steps
 
         self.model = LaTeXOCRModel(vars(args) if not isinstance(args, dict) else args).to(device)
-        self.model.set_train_stage(1)
 
-        # GPU optimizations
         if device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32       = True
@@ -223,22 +209,24 @@ class Trainer:
             print("Compiling visual_encoder with torch.compile ...")
             self.model.visual_encoder = torch.compile(self.model.visual_encoder)
 
-        self.optimizer = _make_optimizer(self.model, args.lr_stage1, args.weight_decay)
-        self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps, self.total_steps)
+        # Freeze decoder for warmup phase; encoder+projector train from step 0
+        if self.decoder_warmup_steps > 0:
+            self.model.freeze_decoder()
+            print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
 
-        self.decoder_warmup_steps = getattr(args, "decoder_warmup_steps", 0)
+        warmup_steps     = max(1, int(args.max_steps * args.warmup_ratio))
+        self.optimizer   = _make_optimizer(self.model, args.lr, args.weight_decay)
+        self.scheduler   = cosine_with_warmup(self.optimizer, warmup_steps, self.total_steps)
 
         if getattr(args, "resume", None):
             self._load_resume(Path(args.resume))
 
-        if self.decoder_warmup_steps > 0 and self.global_step < self.decoder_warmup_steps:
-            self.model.freeze_decoder()
-            print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
-        elif self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
+        # If resuming past the warmup boundary, make sure decoder is unfrozen
+        if self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
+            self.model.unfreeze_all()
             print(f"Resuming at step {self.global_step} — decoder already unfrozen")
 
     def _load_resume(self, resume_dir: Path):
-        # --- model weights ---
         sf = resume_dir / "model.safetensors"
         pt = resume_dir / "model.pt"
         if sf.exists():
@@ -259,7 +247,6 @@ class Trainer:
             self.model.decoder.load_state_dict(dec_state, strict=True)
             print(f"[resume] decoder loaded ({len(dec_state)} tensors)")
 
-        # --- optimizer ---
         opt_pt = resume_dir / "optimizer.pt"
         if opt_pt.exists():
             ts = torch.load(str(opt_pt), map_location="cpu")
@@ -273,7 +260,6 @@ class Trainer:
             self.global_step = ts.get("step", 0)
             print(f"[resume] optimizer loaded, step={self.global_step}")
 
-        # --- scheduler ---
         sched_pt = resume_dir / "scheduler.pt"
         if sched_pt.exists():
             ts = torch.load(str(sched_pt), map_location="cpu")
@@ -282,7 +268,7 @@ class Trainer:
                 self.global_step = ts.get("step", 0)
             print(f"[resume] scheduler loaded")
 
-        # --- fallback: legacy trainer.pt ---
+        # legacy trainer.pt fallback
         trainer_pt = resume_dir / "trainer.pt"
         if trainer_pt.exists() and not opt_pt.exists():
             ts = torch.load(str(trainer_pt), map_location="cpu")
@@ -300,12 +286,27 @@ class Trainer:
     def _forward_loss(self, batch) -> torch.Tensor:
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,
                             enabled=self.device.type == "cuda"):
-            return self.model(
+            loss = self.model(
                 batch["batched_images"],
                 batch["input_ids"],
                 batch["attention_mask"],
                 batch["labels"],
             ).loss
+
+        sparsity_lambda = getattr(self.args, "sparsity_lambda", 0.0)
+        if sparsity_lambda > 0.0:
+            l1 = sum(w.abs().mean() for _, w in self.model.decoder.decoder_linear_weights())
+            loss = loss + sparsity_lambda * l1
+
+        return loss
+
+    def _unfreeze_decoder(self):
+        self.model.unfreeze_all()
+        # Rebuild optimizer to include decoder params with the same lr
+        self.optimizer = _make_optimizer(self.model, self.args.lr, self.args.weight_decay)
+        remaining = self.total_steps - self.global_step
+        self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=0, max_steps=remaining)
+        tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset")
 
     def train(self):
         args       = self.args
@@ -315,7 +316,7 @@ class Trainer:
         data_iter  = iter(self.train_loader)
 
         val_loss_steps = getattr(args, "val_loss_steps", 2500)
-        eval_steps     = getattr(args, "eval_steps",     10000)   # BLEU
+        eval_steps     = getattr(args, "eval_steps", 10000)
 
         pbar = tqdm(total=self.total_steps, initial=self.global_step,
                     desc="Train", unit="step",
@@ -323,6 +324,7 @@ class Trainer:
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
+
         while self.global_step < self.total_steps:
             try:
                 batch = next(data_iter)
@@ -351,17 +353,8 @@ class Trainer:
             micro = 0
             pbar.update(1)
 
-            # unfreeze decoder after warmup
             if self.decoder_warmup_steps > 0 and self.global_step == self.decoder_warmup_steps:
-                self.model.unfreeze_all()
-                # rebuild optimizer to include decoder params
-                self.optimizer = _make_optimizer(self.model, args.lr_stage1, args.weight_decay)
-                self.scheduler = cosine_with_warmup(
-                    self.optimizer,
-                    warmup_steps=0,
-                    max_steps=self.total_steps - self.global_step,
-                )
-                tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset")
+                self._unfreeze_decoder()
 
             if self.global_step % args.log_steps == 0:
                 lr_now    = self.scheduler.get_last_lr()[0]
@@ -375,13 +368,11 @@ class Trainer:
                 }))
             accum_loss = 0.0
 
-            # --- val_loss (fast, frequent) ---
             if self.global_step % val_loss_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)
                 max_val_batches = max(args.eval_samples // ebs, 1)
                 val_metrics = run_val_loss(self.model, self.val_loader, self.device, max_val_batches)
-                log = {"step": self.global_step, **val_metrics}
-                tqdm.write(str(log))
+                tqdm.write(str({"step": self.global_step, **val_metrics}))
 
                 if val_metrics["val_ppl"] < self.best_val_ppl:
                     self.best_val_ppl = val_metrics["val_ppl"]
@@ -392,7 +383,6 @@ class Trainer:
                     )
                     tqdm.write(f"  [best] val_ppl={self.best_val_ppl:.2f} — checkpoint saved")
 
-            # --- BLEU eval (slow, infrequent) ---
             if self.global_step % eval_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)
                 bleu_batches = max(getattr(args, "bleu_samples", 1500) // ebs, 1)
@@ -423,11 +413,10 @@ class Trainer:
         )
         print(f"Training done at step {self.global_step}. Best val_ppl={self.best_val_ppl:.2f}")
 
-        # --- final benchmark on full val set ---
         ebs = getattr(args, "eval_batch_size", 1)
         final_samples = getattr(args, "final_eval_samples", 0)
-        final_batches = (final_samples // ebs) if final_samples > 0 else len(self.val_loader)
-        print(f"Running final eval on {final_batches} batches ({final_batches * ebs} samples)...")
-        final_loss    = run_val_loss(self.model, self.val_loader, self.device, final_batches)
-        final_bleu    = run_bleu_eval(self.model, self.val_loader, self.device, final_batches)
+        final_batches = (final_samples // ebs) if final_samples > 0 else 10000
+        print(f"Running final eval on {final_batches} batches ...")
+        final_loss = run_val_loss(self.model, self.val_loader, self.device, final_batches)
+        final_bleu = run_bleu_eval(self.model, self.val_loader, self.device, final_batches)
         print_metrics({**final_loss, **final_bleu}, prefix="final")

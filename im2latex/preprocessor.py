@@ -202,22 +202,20 @@ class LaTeXOCRFlatParquetDataset(IterableDataset):
 class LaTeXOCRParquetDataset(IterableDataset):
     """Stream image+latex pairs directly from local parquet files.
 
-    Expects parquet files with columns: image (binary), latex (string).
-    Supports multiple source subdirs with per-source sampling weights.
+    Expects layout: data_dir/{src}/*.parquet  (harryrobert/ocr-latex-filter format)
+    Columns: image (bytes), latex (str), source, idx
     """
 
     def __init__(
         self,
         data_dir: str,
-        sources: list[str],          # e.g. ["raw", "light_text", "heavy_text"]
-        weights: list[float],        # interleave sampling weights, same length as sources
+        sources: list[str],
+        weights: list[float],
         tokenizer,
         args,
         rank: int = 0,
         world_size: int = 1,
         seed: int = 42,
-        val_files: int = 0,          # 0 = train (skip first val_files), >0 = val (use first val_files)
-        is_val: bool = False,
     ):
         import random
         self.data_dir   = Path(data_dir)
@@ -226,24 +224,13 @@ class LaTeXOCRParquetDataset(IterableDataset):
         self.rank       = rank
         self.world_size = world_size
         self.seed       = seed
-        self.val_files  = val_files
-        self.is_val     = is_val
 
-        rng = random.Random(seed)
         self.source_files: dict[str, list[Path]] = {}
         self.weights: dict[str, float] = {}
         for src, w in zip(sources, weights):
-            all_files = sorted((self.data_dir / src).glob("*.parquet"))
-            if not all_files:
-                continue
-            rng2 = random.Random(seed)
-            rng2.shuffle(all_files)
-            if is_val:
-                chosen = all_files[:val_files] if val_files else all_files
-            else:
-                chosen = all_files[val_files:] if val_files else all_files
-            if chosen:
-                self.source_files[src] = chosen
+            files = sorted((self.data_dir / src).glob("*.parquet"))
+            if files:
+                self.source_files[src] = files
                 self.weights[src] = w
 
     def _stream_source(self, files: list[Path], rng) -> "Iterator[dict]":
