@@ -201,10 +201,11 @@ def run_val(model, loader, device, max_batches):
 
         total_loss += out.hidden_states[0].item()
 
-        # token_acc: compare argmax(logits) vs labels, ignoring -100
-        logits = out.last_hidden_state          # (B, seq, vocab)
-        labels = batch["labels"]                # (B, seq)
-        shift_logits = logits[:, :-1]
+        # token_acc: slice text portion only (logits includes visual tokens prefix)
+        logits = out.last_hidden_state                   # (B, vis_len+text_len, vocab)
+        labels = batch["labels"]                         # (B, text_len)
+        text_logits  = logits[:, -labels.shape[1]:]     # (B, text_len, vocab)
+        shift_logits = text_logits[:, :-1]
         shift_labels = labels[:, 1:]
         mask = shift_labels != -100
         preds = shift_logits.argmax(dim=-1)

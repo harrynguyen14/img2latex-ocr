@@ -12,10 +12,6 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from torch.utils.data import IterableDataset
 from huggingface_hub import hf_hub_download
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from tokenizer import LaTeXTokenizerV2
-
-
 def get_tokenizer(repo_id: str):
     path = hf_hub_download(repo_id=repo_id, filename="tokenizer/tokenizer.json")
     with open(path, "r", encoding="utf-8") as f:
