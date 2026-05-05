@@ -260,12 +260,6 @@ def main():
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    if device.type == "cuda" and hasattr(torch, "compile"):
-        try:
-            model = torch.compile(model, mode="default")
-            print("[compile] torch.compile enabled")
-        except Exception as e:
-            print(f"[compile] skipped: {e}")
 
     # inject image/token params from model config so dataset preprocessing is always in sync
     args.image_height    = config.image_height
