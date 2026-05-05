@@ -221,11 +221,13 @@ def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=8):
         if tokenizer is not None and i < gen_batches:
             with amp:
                 gen_ids = model.generate(batch["batched_images"], num_beams=1)
+            skip_ids = {tokenizer.pad_token_id, tokenizer.bos_token_id, tokenizer.eos_token_id}
             for j in range(gen_ids.shape[0]):
-                pred = tokenizer.decode(gen_ids[j].tolist(), skip_special_tokens=True)
-                # decode reference từ labels, bỏ -100 (padding/ignored positions)
-                ref_ids = [t for t in batch["labels"][j].tolist() if t != -100]
-                ref = tokenizer.decode(ref_ids, skip_special_tokens=True)
+                pred = "".join(tokenizer.id_to_token(t) for t in gen_ids[j].tolist()
+                               if t not in skip_ids)
+                ref_ids = [t for t in batch["labels"][j].tolist() if t >= 0]
+                ref = "".join(tokenizer.id_to_token(t) for t in ref_ids
+                              if t not in skip_ids)
                 if i == 0 and j < 2:
                     tqdm.write(f"[debug] pred: {pred[:100]}")
                     tqdm.write(f"[debug] ref:  {ref[:100]}")
