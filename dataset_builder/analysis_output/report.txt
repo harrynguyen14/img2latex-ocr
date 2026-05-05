@@ -1,0 +1,140 @@
+======================================================================
+  DATASET QUALITY ANALYSIS REPORT
+  Generated: 2026-05-04 14:15:26
+======================================================================
+
+  Total subsets   : 4
+  Total sampled   : 4,461,311
+  Sample per shard: None
+
+======================================================================
+  SUBSET: HEAVY
+======================================================================
+  Shards          : 28
+  Approx. total   : ~1,400,000 rows (50k × shards)
+  Sampled rows    : 1,389,527
+  Sources         : {'mathwriting': 583042, 'oleehyo': 496871, 'linxy_synthetic_handwrite': 85153, 'linxy_full': 84805, 'hme100k': 66790, 'im2latex': 61096, 'crohme': 10566, 'linxy_human_handwrite': 1204}
+
+  ── IMAGE ──
+  Decode failures : 0  (0.00%)
+  Blank images    : 1,565  (0.11%)
+  Mostly white    : 119,039  (8.57%)
+  Mostly dark     : 23,499  (1.69%)
+  Duplicate imgs  : 0  (0.00%)
+  Color modes     : {'RGB': 1389527}
+  Width  px  mean=412  std=284  min=24  p25=230  p50=342  p75=489  max=1500
+  Height px  mean=93  std=46  min=15  p25=54  p50=93  p75=128  max=500
+  Aspect     mean=4.99  p50=4.43  min=0.44  max=66.67
+  Bytes      mean=34310  p50=16885  min=104  max=939373
+
+  ── LATEX ──
+  Decode failures : 0  (0.00%)
+  Empty strings   : 0  (0.00%)
+  Unbal. braces   : 10,155  (0.73%)
+  Duplicate latex : 312,039  (22.46%)
+  Multi-line      : 36,181  (2.60%)
+  Length chars   mean=75  p50=55  min=2  max=512
+  # Commands     mean=5.8  p50=4  min=0  max=65
+  # \frac       mean=0.64  p50=0  max=19
+  # ^/_          mean=4.38  p50=3  max=100
+
+======================================================================
+  SUBSET: LIGHT
+======================================================================
+  Shards          : 28
+  Approx. total   : ~1,400,000 rows (50k × shards)
+  Sampled rows    : 1,389,527
+  Sources         : {'mathwriting': 583042, 'oleehyo': 496871, 'linxy_synthetic_handwrite': 85153, 'linxy_full': 84805, 'hme100k': 66790, 'im2latex': 61096, 'crohme': 10566, 'linxy_human_handwrite': 1204}
+
+  ── IMAGE ──
+  Decode failures : 0  (0.00%)
+  Blank images    : 29  (0.00%)
+  Mostly white    : 287,129  (20.66%)
+  Mostly dark     : 5  (0.00%)
+  Duplicate imgs  : 12  (0.00%)
+  Color modes     : {'RGB': 1389527}
+  Width  px  mean=412  std=284  min=24  p25=230  p50=342  p75=489  max=1500
+  Height px  mean=93  std=46  min=15  p25=54  p50=93  p75=128  max=500
+  Aspect     mean=4.99  p50=4.43  min=0.44  max=66.67
+  Bytes      mean=24733  p50=10586  min=235  max=841081
+
+  ── LATEX ──
+  Decode failures : 0  (0.00%)
+  Empty strings   : 0  (0.00%)
+  Unbal. braces   : 10,155  (0.73%)
+  Duplicate latex : 312,039  (22.46%)
+  Multi-line      : 36,181  (2.60%)
+  Length chars   mean=75  p50=55  min=2  max=512
+  # Commands     mean=5.8  p50=4  min=0  max=65
+  # \frac       mean=0.64  p50=0  max=19
+  # ^/_          mean=4.38  p50=3  max=100
+
+======================================================================
+  SUBSET: RAW
+======================================================================
+  Shards          : 29
+  Approx. total   : ~1,450,000 rows (50k × shards)
+  Sampled rows    : 1,428,735
+  Sources         : {'oleehyo': 484815, 'mathwriting': 434961, 'printed_tex': 236442, 'linxy_full': 76294, 'linxy_synthetic_handwrite': 74971, 'im2latex': 52808, 'hme100k': 52545, 'crohme_handwritten': 8519, 'crohme': 7173, 'linxy_human_handwrite': 207}
+
+  ── IMAGE ──
+  Decode failures : 0  (0.00%)
+  Blank images    : 14  (0.00%)
+  Mostly white    : 446,636  (31.26%)
+  Mostly dark     : 0  (0.00%)
+  Duplicate imgs  : 5,666  (0.40%)
+  Color modes     : {'RGB': 1428735}
+  Width  px  mean=418  std=358  min=24  p25=219  p50=320  p75=479  max=5601
+  Height px  mean=85  std=82  min=9  p25=41  p50=66  p75=128  max=1010
+  Aspect     mean=5.81  p50=5.00  min=0.37  max=159.64
+  Bytes      mean=6899  p50=4432  min=327  max=1361738
+
+  ── LATEX ──
+  Decode failures : 0  (0.00%)
+  Empty strings   : 0  (0.00%)
+  Unbal. braces   : 12,111  (0.85%)
+  Duplicate latex : 151,211  (10.58%)
+  Multi-line      : 37,797  (2.65%)
+  Length chars   mean=84  p50=67  min=3  max=400
+  # Commands     mean=6.7  p50=5  min=0  max=60
+  # \frac       mean=0.69  p50=0  max=19
+  # ^/_          mean=5.03  p50=4  max=100
+
+======================================================================
+  SUBSET: SCREENSHOT
+======================================================================
+  Shards          : 6
+  Approx. total   : ~300,000 rows (50k × shards)
+  Sampled rows    : 253,522
+  Sources         : {'screenshot_synthetic': 253522}
+
+  ── IMAGE ──
+  Decode failures : 0  (0.00%)
+  Blank images    : 28  (0.01%)
+  Mostly white    : 708  (0.28%)
+  Mostly dark     : 1,560  (0.62%)
+  Duplicate imgs  : 0  (0.00%)
+  Color modes     : {'RGB': 253522}
+  Width  px  mean=579  std=388  min=25  p25=317  p50=484  p75=736  max=8310
+  Height px  mean=79  std=38  min=6  p25=48  p50=75  p75=100  max=489
+  Aspect     mean=8.36  p50=7.08  min=0.27  max=106.30
+  Bytes      mean=64493  p50=32114  min=447  max=3517697
+
+  ── LATEX ──
+  Decode failures : 0  (0.00%)
+  Empty strings   : 0  (0.00%)
+  Unbal. braces   : 1,707  (0.67%)
+  Duplicate latex : 21,809  (8.60%)
+  Multi-line      : 4,430  (1.75%)
+  Length chars   mean=87  p50=70  min=20  max=399
+  # Commands     mean=6.8  p50=5  min=0  max=60
+  # \frac       mean=0.76  p50=0  max=19
+  # ^/_          mean=5.24  p50=4  max=90
+
+======================================================================
+  OVERALL QUALITY SUMMARY
+======================================================================
+  [BAD ] heavy         issue_rate=11.10%  img_dups=0  lat_dups=312,039
+  [BAD ] light         issue_rate=21.40%  img_dups=12  lat_dups=312,039
+  [BAD ] raw           issue_rate=32.11%  img_dups=5,666  lat_dups=151,211
+  [WARN] screenshot    issue_rate=1.58%  img_dups=0  lat_dups=21,809

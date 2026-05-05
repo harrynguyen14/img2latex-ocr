@@ -1,0 +1,26 @@
+{
+  "vocab_size": 2046,
+  "n_frozen": 697,
+  "special_tokens": [
+    "<pad>",
+    "<unk>",
+    "<bos>",
+    "<eos>"
+  ],
+  "pad_token": "<pad>",
+  "unk_token": "<unk>",
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "pad_id": 0,
+  "unk_id": 1,
+  "bos_id": 2,
+  "eos_id": 3,
+  "model_max_length": 256,
+  "padding_side": "right",
+  "truncation_side": "right",
+  "tokenizer_version": 2,
+  "tokenizer_class": "LaTeXTokenizer",
+  "auto_map": {
+      "AutoTokenizer": ["tokenization_latex_ocr.LaTeXTokenizer", null]
+  }
+}

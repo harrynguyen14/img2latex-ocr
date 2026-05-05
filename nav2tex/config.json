@@ -1,0 +1,42 @@
+{
+  "architectures": ["Nav2TexModel"],
+  "model_type": "nav2tex",
+  "processor_class": "Nav2TexProcessor",
+  "auto_map": {
+    "AutoConfig": "configuration_latex_ocr.Nav2TexConfig",
+    "AutoProcessor": "processing_latex_ocr.Nav2TexProcessor",
+    "AutoImageProcessor": "image_processing_latex_ocr.Nav2TexImageProcessor",
+    "AutoModel": "modeling_latex_ocr.Nav2TexModel",
+    "AutoTokenizer": ["tokenization_latex_ocr.LaTeXTokenizer", null],
+    "Pipeline": "pipeline_latex_ocr.Nav2TexPipeline"
+  },
+  "decoder_weights_tied": false,
+  "tie_word_embeddings": false,
+  "pad_token_id": 0,
+  "bos_token_id": 2,
+  "eos_token_id": 3,
+  "decoder_start_token_id": 2,
+  "navit_dim": 512,
+  "vision_hidden_size": 512,
+  "llm_hidden_size": 512,
+  "vocab_size": 2046,
+  "patch_size": 16,
+  "image_height": 64,
+  "max_visual_tokens": 256,
+  "max_new_tokens": 200,
+  "num_beams": 4,
+  "decoder_arch": {
+    "vocab_size": 2046,
+    "pad_id": 0,
+    "bos_id": 2,
+    "eos_id": 3,
+    "d_model": 512,
+    "n_heads": 8,
+    "n_layers": 6,
+    "d_ff": 1408,
+    "dropout": 0.1,
+    "max_seq_len": 200,
+    "rope_theta": 10000.0,
+    "tie_weights": false
+  }
+}

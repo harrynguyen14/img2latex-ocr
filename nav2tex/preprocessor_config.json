@@ -1,0 +1,10 @@
+{
+  "image_processor_type": "Nav2TexImageProcessor",
+  "image_height": 64,
+  "max_image_width": 1024,
+  "patch_size": 16,
+  "auto_map": {
+    "AutoProcessor": "processing_latex_ocr.Nav2TexProcessor",
+    "AutoImageProcessor": "image_processing_latex_ocr.Nav2TexImageProcessor"
+  }
+}

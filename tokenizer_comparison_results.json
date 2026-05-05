@@ -1,0 +1,521 @@
+[
+  {
+    "name": "custom-latex-bpe",
+    "vocab_size": 2046,
+    "compression_ratio": {
+      "mean": 1.603591101204525,
+      "stdev": 0.40723275519111046,
+      "median": 1.5663522012578617
+    },
+    "unk_rate": {
+      "mean": 2.5e-05,
+      "pct_samples_with_unk": 0.001
+    },
+    "garbage_rate_mean": 0.0,
+    "latex_intact_rate": {
+      "mean": 0.9754359944884444,
+      "pct_samples_measured": 0.869
+    },
+    "avg_tokens_per_sample": 52.523,
+    "avg_chars_per_sample": 84.27,
+    "avg_latex_density": 0.27353818547570224,
+    "top_fragmented_commands": [
+      [
+        "\\theta",
+        12
+      ],
+      [
+        "\\ldots",
+        7
+      ],
+      [
+        "\\dots",
+        7
+      ],
+      [
+        "\\quad",
+        5
+      ],
+      [
+        "\\cdots",
+        5
+      ],
+      [
+        "\\infty",
+        5
+      ],
+      [
+        "\\nu",
+        5
+      ],
+      [
+        "\\n",
+        4
+      ],
+      [
+        "\\gamma",
+        4
+      ],
+      [
+        "\\hat",
+        4
+      ]
+    ],
+    "important_command_intact_rates": {
+      "\\frac": {
+        "total": 695,
+        "intact_rate": 0.99568345323741
+      },
+      "\\sqrt": {
+        "total": 101,
+        "intact_rate": 1.0
+      },
+      "\\sum": {
+        "total": 157,
+        "intact_rate": 1.0
+      },
+      "\\int": {
+        "total": 107,
+        "intact_rate": 1.0
+      },
+      "\\prod": {
+        "total": 17,
+        "intact_rate": 1.0
+      },
+      "\\alpha": {
+        "total": 192,
+        "intact_rate": 0.9895833333333334
+      },
+      "\\beta": {
+        "total": 89,
+        "intact_rate": 0.9775280898876404
+      },
+      "\\gamma": {
+        "total": 99,
+        "intact_rate": 0.9595959595959596
+      },
+      "\\delta": {
+        "total": 91,
+        "intact_rate": 0.989010989010989
+      },
+      "\\theta": {
+        "total": 129,
+        "intact_rate": 0.9069767441860465
+      },
+      "\\infty": {
+        "total": 95,
+        "intact_rate": 0.9473684210526315
+      },
+      "\\partial": {
+        "total": 183,
+        "intact_rate": 0.9890710382513661
+      },
+      "\\nabla": {
+        "total": 61,
+        "intact_rate": 1.0
+      },
+      "\\cdot": {
+        "total": 110,
+        "intact_rate": 1.0
+      },
+      "\\times": {
+        "total": 65,
+        "intact_rate": 1.0
+      },
+      "\\leq": {
+        "total": 53,
+        "intact_rate": 1.0
+      },
+      "\\geq": {
+        "total": 19,
+        "intact_rate": 0.8947368421052632
+      },
+      "\\neq": {
+        "total": 8,
+        "intact_rate": 1.0
+      },
+      "\\approx": {
+        "total": 6,
+        "intact_rate": 1.0
+      },
+      "\\equiv": {
+        "total": 13,
+        "intact_rate": 1.0
+      },
+      "\\begin": {
+        "total": 71,
+        "intact_rate": 1.0
+      },
+      "\\end": {
+        "total": 71,
+        "intact_rate": 0.9577464788732394
+      },
+      "\\left": {
+        "total": 236,
+        "intact_rate": 0.9957627118644068
+      },
+      "\\right": {
+        "total": 236,
+        "intact_rate": 1.0
+      },
+      "\\mathbf": {
+        "total": 43,
+        "intact_rate": 0.9534883720930233
+      },
+      "\\mathrm": {
+        "total": 62,
+        "intact_rate": 1.0
+      },
+      "\\mathcal": {
+        "total": 70,
+        "intact_rate": 1.0
+      }
+    }
+  },
+  {
+    "name": "deepseek-ai/DeepSeek-Math-V2",
+    "vocab_size": 128000,
+    "compression_ratio": {
+      "mean": 2.1502195345207626,
+      "stdev": 0.5077039526686822,
+      "median": 2.125
+    },
+    "unk_rate": {
+      "mean": 0.0,
+      "pct_samples_with_unk": 0.0
+    },
+    "garbage_rate_mean": 0.0,
+    "latex_intact_rate": {
+      "mean": 0.2842259705686332,
+      "pct_samples_measured": 0.869
+    },
+    "avg_tokens_per_sample": 38.513,
+    "avg_chars_per_sample": 84.27,
+    "avg_latex_density": 0.27353818547570224,
+    "top_fragmented_commands": [
+      [
+        "\\frac",
+        311
+      ],
+      [
+        "\\partial",
+        102
+      ],
+      [
+        "\\sum",
+        82
+      ],
+      [
+        "\\left",
+        77
+      ],
+      [
+        "\\alpha",
+        74
+      ],
+      [
+        "\\mu",
+        67
+      ],
+      [
+        "\\lambda",
+        64
+      ],
+      [
+        "\\infty",
+        59
+      ],
+      [
+        "\\sqrt",
+        54
+      ],
+      [
+        "\\delta",
+        46
+      ]
+    ],
+    "important_command_intact_rates": {
+      "\\frac": {
+        "total": 695,
+        "intact_rate": 0.27913669064748203
+      },
+      "\\sqrt": {
+        "total": 101,
+        "intact_rate": 0.297029702970297
+      },
+      "\\sum": {
+        "total": 157,
+        "intact_rate": 0.2929936305732484
+      },
+      "\\int": {
+        "total": 107,
+        "intact_rate": 0.38317757009345793
+      },
+      "\\prod": {
+        "total": 17,
+        "intact_rate": 0.0
+      },
+      "\\alpha": {
+        "total": 192,
+        "intact_rate": 0.21875
+      },
+      "\\beta": {
+        "total": 89,
+        "intact_rate": 0.4157303370786517
+      },
+      "\\gamma": {
+        "total": 99,
+        "intact_rate": 0.13131313131313133
+      },
+      "\\delta": {
+        "total": 91,
+        "intact_rate": 0.14285714285714285
+      },
+      "\\theta": {
+        "total": 129,
+        "intact_rate": 0.3953488372093023
+      },
+      "\\infty": {
+        "total": 95,
+        "intact_rate": 0.06315789473684211
+      },
+      "\\partial": {
+        "total": 183,
+        "intact_rate": 0.0
+      },
+      "\\nabla": {
+        "total": 61,
+        "intact_rate": 0.0
+      },
+      "\\cdot": {
+        "total": 110,
+        "intact_rate": 0.6545454545454545
+      },
+      "\\times": {
+        "total": 65,
+        "intact_rate": 0.3230769230769231
+      },
+      "\\leq": {
+        "total": 53,
+        "intact_rate": 0.4339622641509434
+      },
+      "\\geq": {
+        "total": 19,
+        "intact_rate": 0.2631578947368421
+      },
+      "\\neq": {
+        "total": 8,
+        "intact_rate": 0.5
+      },
+      "\\approx": {
+        "total": 6,
+        "intact_rate": 0.0
+      },
+      "\\equiv": {
+        "total": 13,
+        "intact_rate": 0.0
+      },
+      "\\begin": {
+        "total": 71,
+        "intact_rate": 0.29577464788732394
+      },
+      "\\end": {
+        "total": 71,
+        "intact_rate": 0.2676056338028169
+      },
+      "\\left": {
+        "total": 236,
+        "intact_rate": 0.4788135593220339
+      },
+      "\\right": {
+        "total": 236,
+        "intact_rate": 0.2923728813559322
+      },
+      "\\mathbf": {
+        "total": 43,
+        "intact_rate": 0.27906976744186046
+      },
+      "\\mathrm": {
+        "total": 62,
+        "intact_rate": 0.22580645161290322
+      },
+      "\\mathcal": {
+        "total": 70,
+        "intact_rate": 0.37142857142857144
+      }
+    }
+  },
+  {
+    "name": "deepseek-ai/DeepSeek-OCR-2",
+    "vocab_size": 128000,
+    "compression_ratio": {
+      "mean": 2.1502195345207626,
+      "stdev": 0.5077039526686822,
+      "median": 2.125
+    },
+    "unk_rate": {
+      "mean": 0.0,
+      "pct_samples_with_unk": 0.0
+    },
+    "garbage_rate_mean": 0.0,
+    "latex_intact_rate": {
+      "mean": 0.2842259705686332,
+      "pct_samples_measured": 0.869
+    },
+    "avg_tokens_per_sample": 38.513,
+    "avg_chars_per_sample": 84.27,
+    "avg_latex_density": 0.27353818547570224,
+    "top_fragmented_commands": [
+      [
+        "\\frac",
+        311
+      ],
+      [
+        "\\partial",
+        102
+      ],
+      [
+        "\\sum",
+        82
+      ],
+      [
+        "\\left",
+        77
+      ],
+      [
+        "\\alpha",
+        74
+      ],
+      [
+        "\\mu",
+        67
+      ],
+      [
+        "\\lambda",
+        64
+      ],
+      [
+        "\\infty",
+        59
+      ],
+      [
+        "\\sqrt",
+        54
+      ],
+      [
+        "\\delta",
+        46
+      ]
+    ],
+    "important_command_intact_rates": {
+      "\\frac": {
+        "total": 695,
+        "intact_rate": 0.27913669064748203
+      },
+      "\\sqrt": {
+        "total": 101,
+        "intact_rate": 0.297029702970297
+      },
+      "\\sum": {
+        "total": 157,
+        "intact_rate": 0.2929936305732484
+      },
+      "\\int": {
+        "total": 107,
+        "intact_rate": 0.38317757009345793
+      },
+      "\\prod": {
+        "total": 17,
+        "intact_rate": 0.0
+      },
+      "\\alpha": {
+        "total": 192,
+        "intact_rate": 0.21875
+      },
+      "\\beta": {
+        "total": 89,
+        "intact_rate": 0.4157303370786517
+      },
+      "\\gamma": {
+        "total": 99,
+        "intact_rate": 0.13131313131313133
+      },
+      "\\delta": {
+        "total": 91,
+        "intact_rate": 0.14285714285714285
+      },
+      "\\theta": {
+        "total": 129,
+        "intact_rate": 0.3953488372093023
+      },
+      "\\infty": {
+        "total": 95,
+        "intact_rate": 0.06315789473684211
+      },
+      "\\partial": {
+        "total": 183,
+        "intact_rate": 0.0
+      },
+      "\\nabla": {
+        "total": 61,
+        "intact_rate": 0.0
+      },
+      "\\cdot": {
+        "total": 110,
+        "intact_rate": 0.6545454545454545
+      },
+      "\\times": {
+        "total": 65,
+        "intact_rate": 0.3230769230769231
+      },
+      "\\leq": {
+        "total": 53,
+        "intact_rate": 0.4339622641509434
+      },
+      "\\geq": {
+        "total": 19,
+        "intact_rate": 0.2631578947368421
+      },
+      "\\neq": {
+        "total": 8,
+        "intact_rate": 0.5
+      },
+      "\\approx": {
+        "total": 6,
+        "intact_rate": 0.0
+      },
+      "\\equiv": {
+        "total": 13,
+        "intact_rate": 0.0
+      },
+      "\\begin": {
+        "total": 71,
+        "intact_rate": 0.29577464788732394
+      },
+      "\\end": {
+        "total": 71,
+        "intact_rate": 0.2676056338028169
+      },
+      "\\left": {
+        "total": 236,
+        "intact_rate": 0.4788135593220339
+      },
+      "\\right": {
+        "total": 236,
+        "intact_rate": 0.2923728813559322
+      },
+      "\\mathbf": {
+        "total": 43,
+        "intact_rate": 0.27906976744186046
+      },
+      "\\mathrm": {
+        "total": 62,
+        "intact_rate": 0.22580645161290322
+      },
+      "\\mathcal": {
+        "total": 70,
+        "intact_rate": 0.37142857142857144
+      }
+    }
+  }
+]
