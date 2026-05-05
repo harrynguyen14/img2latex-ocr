@@ -185,7 +185,7 @@ def load_resume(model, optimizer, scheduler, resume_dir):
 
 # ── Val metrics ───────────────────────────────────────────────────────────────
 @torch.no_grad()
-def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=8):
+def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=256):
     from im2latex.evaluate import compute_metrics
     model.eval()
     amp = torch.autocast(device_type=device.type, dtype=torch.bfloat16,
