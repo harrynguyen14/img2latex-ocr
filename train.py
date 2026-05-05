@@ -273,7 +273,8 @@ def main():
           f"  patch_size={args.patch_size}  max_token_len={args.max_token_len}")
 
     # ── Tokenizer ──
-    tokenizer = LaTeXTokenizer(str(model_path / "tokenizer.json"))
+    tokenizer = LaTeXTokenizer(str(model_path / "tokenizer.json"),
+                               model_max_length=args.max_token_len)
 
     # ── Datasets ──
     local_data = Path(args.data_path)
