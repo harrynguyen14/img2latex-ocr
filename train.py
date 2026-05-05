@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from im2latex.preprocessor import Nav2TexParquetDataset, Nav2TexFlatParquetDataset
 from im2latex.build_datasets import build_dataloader
 from im2latex.utils import collate_fn, move_batch
-from tokenizer import LaTeXTokenizerV2
+from nav2tex.tokenization_latex_ocr import LaTeXTokenizer
 
 
 # ── Args ──────────────────────────────────────────────────────────────────────
@@ -265,7 +265,7 @@ def main():
           f"  patch_size={args.patch_size}  max_token_len={args.max_token_len}")
 
     # ── Tokenizer ──
-    tokenizer = LaTeXTokenizerV2.load(model_path)
+    tokenizer = LaTeXTokenizer(str(model_path / "tokenizer.json"))
 
     # ── Datasets ──
     local_data = Path(args.data_path)

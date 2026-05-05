@@ -1,14 +1,16 @@
 import io
+import json
+import random
 import sys
 from pathlib import Path
+from typing import Iterator
 
+import numpy as np
 import torch
 import torchvision.transforms.functional as TF
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from torch.utils.data import IterableDataset
 from huggingface_hub import hf_hub_download
-import json
-from typing import Iterator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from tokenizer import LaTeXTokenizerV2
