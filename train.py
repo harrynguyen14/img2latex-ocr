@@ -223,8 +223,12 @@ def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=8):
                 gen_ids = model.generate(batch["batched_images"], num_beams=1)
             for j in range(gen_ids.shape[0]):
                 pred = tokenizer.decode(gen_ids[j].tolist(), skip_special_tokens=True)
-                ref_ids = batch["input_ids"][j].tolist()
+                # decode reference từ labels, bỏ -100 (padding/ignored positions)
+                ref_ids = [t for t in batch["labels"][j].tolist() if t != -100]
                 ref = tokenizer.decode(ref_ids, skip_special_tokens=True)
+                if i == 0 and j < 2:
+                    tqdm.write(f"[debug] pred: {pred[:100]}")
+                    tqdm.write(f"[debug] ref:  {ref[:100]}")
                 predictions.append(pred)
                 references.append(ref)
         n += 1
