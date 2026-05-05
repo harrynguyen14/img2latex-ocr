@@ -221,10 +221,15 @@ def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=8):
         if tokenizer is not None and i < gen_batches:
             with amp:
                 gen_ids = model.generate(batch["batched_images"], num_beams=1)
-            skip_ids = {tokenizer.pad_token_id, tokenizer.bos_token_id, tokenizer.eos_token_id}
+            eos_id   = tokenizer.eos_token_id
+            skip_ids = {tokenizer.pad_token_id, tokenizer.bos_token_id, eos_id}
             for j in range(gen_ids.shape[0]):
+                # truncate tại EOS nếu có
+                tok_list = gen_ids[j].tolist()
+                if eos_id in tok_list:
+                    tok_list = tok_list[:tok_list.index(eos_id)]
                 pred = "".join(tokenizer.convert_ids_to_tokens(
-                               [t for t in gen_ids[j].tolist() if t not in skip_ids]))
+                               [t for t in tok_list if t not in skip_ids]))
                 ref_ids = [t for t in batch["labels"][j].tolist() if t >= 0 and t not in skip_ids]
                 ref = "".join(tokenizer.convert_ids_to_tokens(ref_ids))
                 if i == 0 and j < 2:
