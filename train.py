@@ -219,13 +219,14 @@ def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=256)
 
         # collect predictions for BLEU/exact_match (only first gen_batches batches)
         if tokenizer is not None and i < gen_batches:
-            with amp:
-                gen_ids = model.generate(batch["batched_images"], num_beams=1)
             eos_id   = tokenizer.eos_token_id
             skip_ids = {tokenizer.pad_token_id, tokenizer.bos_token_id, eos_id}
-            for j in range(gen_ids.shape[0]):
-                # truncate tại EOS nếu có
-                tok_list = gen_ids[j].tolist()
+            B = len(batch["batched_images"])
+            for j in range(B):
+                single_images = [batch["batched_images"][j]]
+                with amp:
+                    gen_ids = model.generate(single_images, num_beams=4)  # (1, seq)
+                tok_list = gen_ids[0].tolist()
                 if eos_id in tok_list:
                     tok_list = tok_list[:tok_list.index(eos_id)]
                 pred = "".join(tokenizer.convert_ids_to_tokens(
