@@ -185,7 +185,8 @@ def load_resume(model, optimizer, scheduler, resume_dir):
 
 # ── Val metrics ───────────────────────────────────────────────────────────────
 @torch.no_grad()
-def run_val(model, loader, device, max_batches):
+def run_val(model, loader, device, max_batches, tokenizer=None, gen_batches=8):
+    from im2latex.evaluate import compute_metrics
     model.eval()
     amp = torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                          enabled=device.type == "cuda")
@@ -193,6 +194,7 @@ def run_val(model, loader, device, max_batches):
     correct = 0
     total_tokens = 0
     n = 0
+    predictions, references = [], []
 
     for i, batch in enumerate(loader):
         if i >= max_batches:
@@ -214,6 +216,17 @@ def run_val(model, loader, device, max_batches):
         preds = shift_logits.argmax(dim=-1)
         correct      += (preds[mask] == shift_labels[mask]).sum().item()
         total_tokens += mask.sum().item()
+
+        # collect predictions for BLEU/exact_match (only first gen_batches batches)
+        if tokenizer is not None and i < gen_batches:
+            with amp:
+                gen_ids = model.generate(batch["batched_images"], num_beams=1)
+            for j in range(gen_ids.shape[0]):
+                pred = tokenizer.decode(gen_ids[j].tolist(), skip_special_tokens=True)
+                ref_ids = batch["input_ids"][j].tolist()
+                ref = tokenizer.decode(ref_ids, skip_special_tokens=True)
+                predictions.append(pred)
+                references.append(ref)
         n += 1
 
     model.train()
@@ -221,11 +234,17 @@ def run_val(model, loader, device, max_batches):
         return {"val_loss": float("inf"), "val_ppl": float("inf"), "token_acc": 0.0}
     avg = total_loss / n
     token_acc = correct / max(total_tokens, 1)
-    return {
+    metrics = {
         "val_loss":  round(avg, 4),
         "val_ppl":   round(math.exp(min(avg, 20.0)), 2),
         "token_acc": round(token_acc, 4),
     }
+    if predictions:
+        gen_metrics = compute_metrics(predictions, references)
+        metrics["bleu4"]        = gen_metrics["bleu4"]
+        metrics["exact_match"]  = gen_metrics["exact_match"]
+        metrics["edit_distance"]= gen_metrics["edit_distance"]
+    return metrics
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -368,7 +387,7 @@ def main():
 
         if global_step % args.val_loss_steps == 0:
             max_val = max(args.eval_samples // args.eval_batch_size, 1)
-            val_metrics = run_val(model, val_loader, device, max_val)
+            val_metrics = run_val(model, val_loader, device, max_val, tokenizer=tokenizer)
             tqdm.write(str({"step": global_step, **val_metrics}))
             if val_metrics["val_ppl"] < best_ppl:
                 best_ppl = val_metrics["val_ppl"]
