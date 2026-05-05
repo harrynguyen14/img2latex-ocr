@@ -17,7 +17,10 @@ import os
 import random
 import shutil
 import sys
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", message="Token indices sequence length is longer")
 
 import numpy as np
 import torch
@@ -259,7 +262,7 @@ def main():
 
     if device.type == "cuda" and hasattr(torch, "compile"):
         try:
-            model = torch.compile(model, mode="reduce-overhead")
+            model = torch.compile(model, mode="default")
             print("[compile] torch.compile enabled")
         except Exception as e:
             print(f"[compile] skipped: {e}")
