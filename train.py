@@ -256,6 +256,13 @@ def main():
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    if device.type == "cuda" and hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("[compile] torch.compile enabled")
+        except Exception as e:
+            print(f"[compile] skipped: {e}")
+
     # inject image/token params from model config so dataset preprocessing is always in sync
     args.image_height    = config.image_height
     args.max_image_width = config.max_image_width
@@ -335,7 +342,7 @@ def main():
             loss = out.hidden_states[0] / accum
 
         loss.backward()
-        accum_loss += loss.item()
+        accum_loss += out.hidden_states[0].item()
         micro += 1
 
         if micro < accum:
