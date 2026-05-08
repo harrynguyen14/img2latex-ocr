@@ -16,6 +16,16 @@ def parse_args():
     ap.add_argument("--data_path",           type=str,   default="/workspace/data")
     ap.add_argument("--sources", nargs="+",  type=str,   default=["raw", "light", "heavy"])
     ap.add_argument("--weights", nargs="+",  type=float, default=[1.0, 1.0, 1.0])
+    ap.add_argument(
+        "--weight_stages",
+        type=str,
+        default="",
+        help=(
+            "Optional schedule for train sampling weights. "
+            "Format: step:w1,w2,w3;step:w1,w2,w3 (aligned with --sources). "
+            "Example: 0:0.8,0.15,0.05;40000:0.6,0.25,0.15;80000:0.45,0.3,0.25"
+        ),
+    )
     ap.add_argument("--max_token_len",       type=int,   default=1024)
     ap.add_argument("--max_image_width",     type=int,   default=1024)
     ap.add_argument("--max_image_height",    type=int,   default=640)

@@ -16,7 +16,8 @@ try:
 except ImportError:
     HAS_SAFETENSORS = False
 
-from .utils import move_batch
+from .build_datasets import build_dataloader
+from .utils import collate_fn, move_batch
 from .nav2tex import LaTeXOCRModel
 from .nav2tex.model import decode_ids
 from .evaluate import compute_metrics, print_metrics
@@ -91,6 +92,30 @@ def _unflatten_tensors(tensors: dict, scalars: dict, prefix: str) -> dict:
             node = node.setdefault(part, {})
         node[parts[-1]] = val
     return result
+
+
+def _parse_weight_stages(stages_str: str, sources: list[str]) -> list[tuple[int, dict[str, float]]]:
+    if not stages_str:
+        return []
+
+    parsed: list[tuple[int, dict[str, float]]] = []
+    for chunk in stages_str.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk:
+            raise ValueError(f"Invalid weight stage '{chunk}'. Expected 'step:w1,w2,...'")
+        step_text, weights_text = chunk.split(":", 1)
+        step = int(step_text.strip())
+        vals = [float(x.strip()) for x in weights_text.split(",") if x.strip()]
+        if len(vals) != len(sources):
+            raise ValueError(
+                f"Stage '{chunk}' has {len(vals)} weights but {len(sources)} sources were provided"
+            )
+        parsed.append((step, {src: val for src, val in zip(sources, vals)}))
+
+    parsed.sort(key=lambda x: x[0])
+    return parsed
 
 
 def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir: Path, tokenizer=None):
@@ -203,6 +228,9 @@ class Trainer:
         self.global_step          = 0
         self.best_val_ppl         = float("inf")
         self.decoder_warmup_steps = args.decoder_warmup_steps
+        self.sources              = list(getattr(args, "sources", []))
+        self.weight_stages        = _parse_weight_stages(getattr(args, "weight_stages", ""), self.sources)
+        self.active_weight_stage  = -1
 
         self.model = LaTeXOCRModel(
             vars(args) if not isinstance(args, dict) else args,
@@ -232,6 +260,8 @@ class Trainer:
         if self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
             self.model.unfreeze_all()
             print(f"Resuming at step {self.global_step} — decoder already unfrozen")
+
+        self._maybe_switch_weight_stage(force=True)
 
     def _load_resume(self, resume_dir: Path):
         sf = resume_dir / "model.safetensors"
@@ -278,6 +308,49 @@ class Trainer:
                 batch["labels"],
             )
         return out.loss, out.lm_loss, out.len_loss
+
+    def _rebuild_train_loader(self):
+        args = self.args
+        nw = args.num_workers
+        prefetch = args.prefetch_factor
+        persistent = args.persistent_workers and nw > 0
+        self.train_loader = build_dataloader(
+            self.train_loader.dataset,
+            args.batch_size,
+            nw,
+            collate_fn,
+            self.device.type == "cuda",
+            prefetch,
+            persistent,
+        )
+
+    def _maybe_switch_weight_stage(self, force: bool = False) -> bool:
+        if not self.weight_stages:
+            return False
+        if not hasattr(self.train_loader.dataset, "set_weights"):
+            return False
+
+        target_idx = -1
+        for i, (start_step, _weights) in enumerate(self.weight_stages):
+            if self.global_step >= start_step:
+                target_idx = i
+            else:
+                break
+
+        if target_idx < 0:
+            return False
+        if not force and target_idx == self.active_weight_stage:
+            return False
+
+        stage_step, stage_weights = self.weight_stages[target_idx]
+        self.train_loader.dataset.set_weights(stage_weights)
+        self._rebuild_train_loader()
+        self.active_weight_stage = target_idx
+        tqdm.write(
+            f"[data] switched source weights at step={self.global_step} "
+            f"(stage start={stage_step}): {stage_weights}"
+        )
+        return True
 
     def _unfreeze_decoder(self):
         self.model.unfreeze_all()
@@ -335,6 +408,9 @@ class Trainer:
             self.global_step += 1
             micro = 0
             pbar.update(1)
+
+            if self._maybe_switch_weight_stage():
+                data_iter = iter(self.train_loader)
 
             if self.decoder_warmup_steps > 0 and self.global_step == self.decoder_warmup_steps:
                 self._unfreeze_decoder()

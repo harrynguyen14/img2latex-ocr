@@ -189,6 +189,11 @@ class Nav2TexTrainDataset(IterableDataset):
                 self.source_files[src] = files
                 self.weights[src] = w
 
+    def set_weights(self, new_weights: dict[str, float]) -> None:
+        for src in self.source_files.keys():
+            if src in new_weights:
+                self.weights[src] = float(new_weights[src])
+
     def _stream_source(self, files: list[Path], rng):
         import pyarrow.parquet as pq
         for pfile in files:
