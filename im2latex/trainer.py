@@ -17,9 +17,9 @@ except ImportError:
     HAS_SAFETENSORS = False
 
 from .utils import move_batch
-from .latex_ocr_model import LaTeXOCRModel
+from .nav2tex import LaTeXOCRModel
+from .nav2tex.model import decode_ids
 from .evaluate import compute_metrics, print_metrics
-from .latex_ocr_model.model import decode_ids
 
 
 def cosine_with_warmup(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
@@ -32,11 +32,10 @@ def cosine_with_warmup(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
 
 
 def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float) -> AdamW:
-    no_decay = set()
-    for name, module in model.named_modules():
-        if isinstance(module, nn.LayerNorm) or "norm" in name:
-            for pname, _ in module.named_parameters(prefix=name):
-                no_decay.add(pname)
+    no_decay = {
+        n for n, p in model.named_parameters()
+        if p.requires_grad and (p.ndim < 2 or "norm" in n.lower() or n.endswith(".bias"))
+    }
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     return AdamW(
         [
@@ -47,23 +46,9 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float) -> Ada
     )
 
 
-def _checkpoint_decoder_is_tied(state: dict) -> bool | None:
-    embed = state.get("decoder._model.embed_tokens.weight")
-    lm_head = state.get("decoder._model.lm_head.weight")
-    if embed is None or lm_head is None:
-        return None
-    return torch.equal(embed, lm_head)
-
-
 def _load_model_state(model: LaTeXOCRModel, state: dict, strict: bool = True) -> None:
-    """
-    Load visual_encoder và decoder từ state dict, sau đó re-tie lm_head weights.
-
-    Safetensors luôn save/load embed_tokens và lm_head thành 2 tensor độc lập,
-    phá vỡ tie_weights. Hàm này đảm bảo tie được restore đúng sau mỗi lần load.
-    """
-    ve_state = {k[len("visual_encoder."):]: v
-                for k, v in state.items() if k.startswith("visual_encoder.")}
+    ve_state  = {k[len("visual_encoder."):]: v
+                 for k, v in state.items() if k.startswith("visual_encoder.")}
     dec_state = {k[len("decoder."):]: v
                  for k, v in state.items() if k.startswith("decoder.")}
 
@@ -72,122 +57,84 @@ def _load_model_state(model: LaTeXOCRModel, state: dict, strict: bool = True) ->
         tqdm.write(f"[ckpt] visual_encoder loaded ({len(ve_state)} tensors)")
 
     if dec_state:
-        ckpt_tied = _checkpoint_decoder_is_tied(state)
-        if ckpt_tied is False:
-            model.decoder.untie_weights()
-            tqdm.write("[ckpt] decoder checkpoint is LEGACY untied; preserving separate lm_head/embed_tokens")
         model.decoder.load_state_dict(dec_state, strict=strict)
-        if ckpt_tied is not False:
-            # Tied checkpoints are duplicated as 2 tensors in safetensors, so re-tie after load.
-            model.decoder.tie_weights()
-        tied = model.decoder.are_weights_tied()
-        tqdm.write(f"[ckpt] decoder loaded ({len(dec_state)} tensors) | "
-                   f"tie_weights={'OK' if tied else 'FAILED!'}")
+        tqdm.write(f"[ckpt] decoder loaded ({len(dec_state)} tensors)")
 
     if not ve_state and not dec_state:
-        # fallback: flat state dict không có prefix
-        ckpt_tied = _checkpoint_decoder_is_tied(state)
-        if ckpt_tied is False:
-            model.decoder.untie_weights()
         model.load_state_dict(state, strict=strict)
-        if ckpt_tied is not False:
-            model.decoder.tie_weights()
         tqdm.write("[ckpt] model loaded (flat state dict)")
 
 
-def _verify_safetensors(path: Path, expected_keys: set) -> bool:
-    if not path.exists():
-        return False
-    try:
-        loaded = st_load_file(str(path))
-    except Exception as e:
-        tqdm.write(f"[ckpt] safetensors load error: {e}")
-        return False
-    missing = expected_keys - set(loaded.keys())
-    extra   = set(loaded.keys()) - expected_keys
-    if missing:
-        tqdm.write(f"[ckpt] WARNING: missing keys in safetensors: {missing}")
-        return False
-    if extra:
-        tqdm.write(f"[ckpt] WARNING: unexpected extra keys in safetensors: {extra}")
-    return True
+def _flatten_tensors(d: dict, prefix: str) -> tuple[dict, dict]:
+    tensors, scalars = {}, {}
+    for k, v in d.items():
+        full_key = f"{prefix}/{k}"
+        if isinstance(v, torch.Tensor):
+            tensors[full_key] = v.cpu()
+        elif isinstance(v, dict):
+            t, s = _flatten_tensors(v, full_key)
+            tensors.update(t); scalars.update(s)
+        else:
+            scalars[full_key] = v
+    return tensors, scalars
 
 
-def _save_checkpoint(
-    model: LaTeXOCRModel,
-    optimizer,
-    scheduler,
-    step: int,
-    ckpt_dir: Path,
-    keep_last_n: int,
-    tokenizer_dir: str | None = None,
-):
+def _unflatten_tensors(tensors: dict, scalars: dict, prefix: str) -> dict:
+    result = {}
+    sub = prefix + "/"
+    for key, val in {**tensors, **scalars}.items():
+        if not key.startswith(sub):
+            continue
+        parts = key[len(sub):].split("/")
+        node = result
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = val
+    return result
+
+
+def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir: Path, tokenizer=None):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Lấy state dict — safetensors sẽ save embed_tokens và lm_head riêng biệt
-    # dù chúng đang tied. Đây là behaviour bình thường của safetensors.
-    # Quan trọng: sau khi load lại phải gọi tie_weights() (xử lý trong _load_model_state)
-    state = {
-        f"visual_encoder.{k}": v.contiguous().cpu()
-        for k, v in model.visual_encoder.state_dict().items()
-    }
-    state.update({
-        f"decoder.{k}": v.contiguous().cpu()
-        for k, v in model.decoder.state_dict().items()
-    })
-    expected_keys = set(state.keys())
+    state = {f"visual_encoder.{k}": v.contiguous().cpu()
+             for k, v in model.visual_encoder.state_dict().items()}
+    state.update({f"decoder.{k}": v.contiguous().cpu()
+                  for k, v in model.decoder.state_dict().items()})
+    st_save_file(state, ckpt_dir / "model.safetensors")
 
-    if HAS_SAFETENSORS:
-        sf_path = ckpt_dir / "model.safetensors"
-        st_save_file(state, sf_path)
-        ok = _verify_safetensors(sf_path, expected_keys)
-        if ok:
-            tqdm.write(f"[ckpt] model.safetensors verified ({len(expected_keys)} tensors)")
-        else:
-            tqdm.write(f"[ckpt] WARNING: model.safetensors verification FAILED")
-    else:
-        torch.save(state, ckpt_dir / "model.pt")
-        tqdm.write("[ckpt] safetensors not available, saved model.pt")
-
-    torch.save({"optimizer": optimizer.state_dict(), "step": step}, ckpt_dir / "optimizer.pt")
-    torch.save({"scheduler": scheduler.state_dict(), "step": step}, ckpt_dir / "scheduler.pt")
-
-    with open(ckpt_dir / "trainer_state.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "global_step": step,
-                "best_val_ppl": getattr(model, "_best_val_ppl", None),
-                "decoder_weights_tied": model.decoder.are_weights_tied(),
-            },
-            f,
-            indent=2,
-        )
+    opt_tensors, opt_scalars = _flatten_tensors(optimizer.state_dict(), "optimizer")
+    sch_tensors, sch_scalars = _flatten_tensors({"state": scheduler.state_dict()}, "scheduler")
+    trainer_tensors = {**opt_tensors, **sch_tensors}
+    trainer_scalars = {**opt_scalars, **sch_scalars, "step": step}
+    if not trainer_tensors:
+        trainer_tensors["_sentinel"] = torch.zeros(1)
+    metadata = {k: json.dumps(v) for k, v in trainer_scalars.items()}
+    st_save_file(trainer_tensors, ckpt_dir / "trainer.safetensors", metadata=metadata)
 
     with open(ckpt_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(model.config, f, indent=2, ensure_ascii=False)
 
-    # Copy tokenizer files vào checkpoint để self-contained
-    if tokenizer_dir is not None:
-        tok_src = Path(tokenizer_dir)
-        if tok_src.exists():
-            tok_dst = ckpt_dir / "tokenizer"
-            tok_dst.mkdir(exist_ok=True)
-            for fname in ("tokenizer.json", "tokenizer_v2.json",
-                          "tokenizer_config.json", "special_tokens_map.json"):
-                src = tok_src / fname
-                if src.exists():
-                    shutil.copy2(src, tok_dst / fname)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(str(ckpt_dir / "tokenizer"))
 
-    parent = ckpt_dir.parent
-    all_ckpts = sorted(parent.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
+
+def _save_best(model, optimizer, scheduler, step, ckpt_dir: Path, tokenizer=None):
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    _write_ckpt(model, optimizer, scheduler, step, ckpt_dir, tokenizer)
+    tqdm.write(f"[ckpt] best/ overwritten at step {step}")
+
+
+def _save_periodic(model, optimizer, scheduler, step, base_dir: Path, keep_last_n: int, tokenizer=None):
+    ckpt_dir = base_dir / f"step_{step:07d}"
+    _write_ckpt(model, optimizer, scheduler, step, ckpt_dir, tokenizer)
+    tqdm.write(f"[ckpt] {ckpt_dir.name} saved")
+
+    all_ckpts = sorted(base_dir.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
     while len(all_ckpts) > keep_last_n:
         old = all_ckpts.pop(0)
-        for fi in old.iterdir():
-            if fi.is_dir():
-                shutil.rmtree(fi)
-            else:
-                fi.unlink()
-        old.rmdir()
+        shutil.rmtree(old)
+        tqdm.write(f"[ckpt] {old.name} removed")
 
 
 @torch.no_grad()
@@ -221,13 +168,7 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
     model.eval()
     preds, refs = [], []
 
-    model_tok = model.tokenizer
-    pad_id    = model.decoder.pad_token_id
-    eos_id    = model.decoder.eos_token_id
-    bos_id    = model_tok.token_to_id("<bos>")
-    skip_ids  = {pad_id, eos_id}
-    if bos_id is not None:
-        skip_ids.add(bos_id)
+    skip_ids = {model.decoder.pad_token_id, model.decoder.eos_token_id, model.decoder.bos_token_id}
 
     for i, batch in enumerate(loader):
         if i >= max_batches:
@@ -238,7 +179,7 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
 
         for ids in batch["labels"].cpu().tolist():
             valid_ids = [x for x in ids if x >= 0]
-            refs.append(decode_ids(model_tok, valid_ids, skip_ids=skip_ids))
+            refs.append(decode_ids(model.tokenizer, valid_ids, skip_ids=skip_ids))
 
     model.train()
 
@@ -277,7 +218,6 @@ class Trainer:
             print("Compiling visual_encoder with torch.compile ...")
             self.model.visual_encoder = torch.compile(self.model.visual_encoder)
 
-        # Freeze decoder cho warmup phase
         if self.decoder_warmup_steps > 0:
             self.model.freeze_decoder()
             print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
@@ -289,7 +229,6 @@ class Trainer:
         if getattr(args, "resume", None):
             self._load_resume(Path(args.resume))
 
-        # Nếu resume qua warmup boundary thì unfreeze decoder
         if self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
             self.model.unfreeze_all()
             print(f"Resuming at step {self.global_step} — decoder already unfrozen")
@@ -297,59 +236,48 @@ class Trainer:
     def _load_resume(self, resume_dir: Path):
         sf = resume_dir / "model.safetensors"
         if not sf.exists():
-            print(f"[resume] No model file in {resume_dir}")
+            print(f"[resume] No model.safetensors in {resume_dir}")
             return
 
-        state = st_load_file(str(sf))
+        _load_model_state(self.model, st_load_file(str(sf)), strict=True)
 
-        # Dùng _load_model_state để đảm bảo tie_weights được restore
-        _load_model_state(self.model, state, strict=True)
+        trainer_sf = resume_dir / "trainer.safetensors"
+        if trainer_sf.exists():
+            from safetensors import safe_open
+            trainer_tensors = st_load_file(str(trainer_sf), device="cpu")
+            trainer_tensors.pop("_sentinel", None)
+            with safe_open(str(trainer_sf), framework="pt", device="cpu") as f:
+                metadata = f.metadata() or {}
+            trainer_scalars = {k: json.loads(v) for k, v in metadata.items()}
 
-        opt_pt = resume_dir / "optimizer.pt"
-        if opt_pt.exists():
-            ts = torch.load(str(opt_pt), map_location="cpu")
-            opt_state    = ts.get("optimizer", ts)
-            self.global_step = ts.get("step", 0)
+            self.global_step = int(trainer_scalars.get("step", 0))
+
+            opt_sd = _unflatten_tensors(trainer_tensors, trainer_scalars, "optimizer")
+            sch_sd = _unflatten_tensors(trainer_tensors, trainer_scalars, "scheduler")
+            sch_sd = sch_sd.get("state", sch_sd)
 
             device = next(self.model.parameters()).device
-            for s in opt_state["state"].values():
+            for s in opt_sd.get("state", {}).values():
                 for k, v in s.items():
                     if isinstance(v, torch.Tensor):
                         s[k] = v.to(device)
             try:
-                self.optimizer.load_state_dict(opt_state)
-                print(f"[resume] optimizer loaded, step={self.global_step}")
-            except ValueError as e:
-                print(f"[resume] WARNING: Optimizer mismatch ({e}). Using fresh optimizer.")
+                self.optimizer.load_state_dict(opt_sd)
+                self.scheduler.load_state_dict(sch_sd)
+                print(f"[resume] optimizer+scheduler loaded, step={self.global_step}")
             except Exception as e:
-                print(f"[resume] WARNING: Could not load optimizer: {e}")
+                print(f"[resume] WARNING: Could not load optimizer/scheduler: {e}")
 
-        sched_pt = resume_dir / "scheduler.pt"
-        if sched_pt.exists():
-            ts = torch.load(str(sched_pt), map_location="cpu")
-            sched_state = ts.get("scheduler", ts)
-            try:
-                self.scheduler.load_state_dict(sched_state)
-                print("[resume] scheduler loaded")
-            except Exception:
-                print("[resume] WARNING: Scheduler mismatch. Skipping.")
-
-    def _forward_loss(self, batch) -> torch.Tensor:
+    def _forward_loss(self, batch) -> tuple:
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,
                             enabled=self.device.type == "cuda"):
-            loss = self.model(
+            out = self.model(
                 batch["batched_images"],
                 batch["input_ids"],
                 batch["attention_mask"],
                 batch["labels"],
-            ).loss
-
-        sparsity_lambda = getattr(self.args, "sparsity_lambda", 0.0)
-        if sparsity_lambda > 0.0:
-            l1 = sum(w.abs().mean() for _, w in self.model.decoder.decoder_linear_weights())
-            loss = loss + sparsity_lambda * l1
-
-        return loss
+            )
+        return out.loss, out.lm_loss, out.len_loss
 
     def _unfreeze_decoder(self):
         self.model.unfreeze_all()
@@ -375,6 +303,9 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
+        accum_lm_loss  = 0.0
+        accum_len_loss = 0.0
+
         while self.global_step < self.total_steps:
             try:
                 batch = next(data_iter)
@@ -383,9 +314,11 @@ class Trainer:
                 batch = next(data_iter)
 
             batch = move_batch(batch, self.device)
-            loss  = self._forward_loss(batch) / accum
-            loss.backward()
-            accum_loss += loss.item()
+            loss, lm_loss, len_loss = self._forward_loss(batch)
+            (loss / accum).backward()
+            accum_loss    += loss.item()    / accum
+            accum_lm_loss += lm_loss.item() / accum
+            accum_len_loss+= len_loss.item()/ accum
             micro += 1
 
             if micro < accum:
@@ -411,12 +344,16 @@ class Trainer:
                 train_ppl = math.exp(min(accum_loss, 20.0))
                 tqdm.write(str({
                     "ppl":       round(train_ppl, 2),
-                    "loss":      round(accum_loss, 4),
-                    "grad_norm": round(grad_norm,  4),
+                    "loss":      round(accum_loss,     4),
+                    "lm":        round(accum_lm_loss,  4),
+                    "len":       round(accum_len_loss, 4),
+                    "grad_norm": round(grad_norm,      4),
                     "lr":        f"{lr_now:.2e}",
                     "step":      self.global_step,
                 }))
-            accum_loss = 0.0
+            accum_loss     = 0.0
+            accum_lm_loss  = 0.0
+            accum_len_loss = 0.0
 
             if self.global_step % val_loss_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)
@@ -426,12 +363,9 @@ class Trainer:
 
                 if val_metrics["val_ppl"] < self.best_val_ppl:
                     self.best_val_ppl = val_metrics["val_ppl"]
-                    _save_checkpoint(
-                        self.model, self.optimizer, self.scheduler,
-                        self.global_step, self.ckpt_dir / "best", keep_last_n=999,
-                        tokenizer_dir=getattr(args, "tokenizer_dir", None),
-                    )
-                    tqdm.write(f"  [best] val_ppl={self.best_val_ppl:.2f} — checkpoint saved")
+                    _save_best(self.model, self.optimizer, self.scheduler,
+                               self.global_step, self.ckpt_dir / "best", self.tokenizer)
+                    tqdm.write(f"  [best] val_ppl={self.best_val_ppl:.2f}")
 
             if self.global_step % eval_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)
@@ -447,20 +381,12 @@ class Trainer:
                     self.model.train()
 
             if self.global_step % args.save_steps == 0:
-                _save_checkpoint(
-                    self.model, self.optimizer, self.scheduler,
-                    self.global_step,
-                    self.ckpt_dir / f"step_{self.global_step:07d}",
-                    keep_last_n=3,
-                    tokenizer_dir=getattr(args, "tokenizer_dir", None),
-                )
+                _save_periodic(self.model, self.optimizer, self.scheduler,
+                               self.global_step, self.ckpt_dir, keep_last_n=3, tokenizer=self.tokenizer)
 
         pbar.close()
-        _save_checkpoint(
-            self.model, self.optimizer, self.scheduler,
-            self.global_step, self.ckpt_dir / "final", keep_last_n=999,
-            tokenizer_dir=getattr(args, "tokenizer_dir", None),
-        )
+        _save_periodic(self.model, self.optimizer, self.scheduler,
+                       self.global_step, self.ckpt_dir, keep_last_n=3, tokenizer=self.tokenizer)
         print(f"Training done at step {self.global_step}. Best val_ppl={self.best_val_ppl:.2f}")
 
         ebs = getattr(args, "eval_batch_size", 1)

@@ -1,140 +1,180 @@
+import glob
 import random
-from pathlib import Path
+import re
 from typing import Iterator
 
 import torch
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import pyarrow.parquet as pq
+from transformers import NougatTokenizerFast
 
-import sys
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "tokenizer_v2"))
-from tokenizer import LaTeXTokenizerV2 as LaTeXTokenizer
+from normalize import normalize
 
-from config import DecoderConfig
+_CPE_PATTERNS = re.compile(
+    r'\\(frac|int|sum|prod|matrix|pmatrix|bmatrix|cases|align|begin|sqrt'
+    r'|underbrace|overbrace|overset|underset|substack|bigoplus|bigotimes'
+    r'|lim|sup|inf|max|min)\b'
+)
 
-
-def _split_files(path: Path, ratio: float, seed: int, val_files: int = 3) -> tuple[list[Path], list[Path]]:
-    files = sorted(path.glob("*.parquet"))
-    n_keep = max(1, round(len(files) * ratio))
-    sampled = random.Random(seed).sample(files, n_keep)
-    return sampled[val_files:], sampled[:val_files]
-
-
-def _stream_parquet(files: list[Path], rng: random.Random) -> Iterator[str]:
-    for pfile in files:
-        table = pq.read_table(str(pfile), columns=["latex"])
-        rows  = table["latex"].to_pylist()
-        rng.shuffle(rows)
-        for val in rows:
-            if val and isinstance(val, str) and val.strip():
-                yield val.strip()
+def _complexity_score(s: str) -> float:
+    char_len   = len(s)
+    cmd_count  = len(_CPE_PATTERNS.findall(s))
+    nest_depth = s.count('{')
+    return char_len + cmd_count * 15 + nest_depth * 10
 
 
-def _get_pools(cfg: DecoderConfig, seed: int) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
-    base = Path(cfg.data_dir)
-    # support both data_dir/raw/ and data_dir/train/raw/
-    if (base / "train" / "raw").exists():
-        base = base / "train"
-    sources = {
-        "raw":        (base / "raw",        cfg.raw_ratio),
-        "light_text": (base / "light_text", cfg.light_ratio),
-        "heavy_text": (base / "heavy_text", cfg.heavy_ratio),
-    }
-    train_pools, val_pools = {}, {}
-    for name, (path, ratio) in sources.items():
-        tr, va = _split_files(path, ratio, seed)
-        train_pools[name] = tr
-        val_pools[name]   = va
-    return train_pools, val_pools
+class LaTeXDataset(Dataset):
+    def __init__(self, config):
+        self.config    = config
+        self.tokenizer = NougatTokenizerFast.from_pretrained(config.tokenizer_dir)
+
+        files = sorted(glob.glob(config.data_glob))
+        if not files:
+            raise FileNotFoundError(f"No parquet files found: {config.data_glob}")
+
+        rows = []
+        for f in files:
+            table = pq.read_table(f, columns=["latex"])
+            rows.extend(table["latex"].to_pylist())
+
+        self.samples = [r for r in rows if r and isinstance(r, str) and r.strip()]
+        self._scores = [_complexity_score(s) for s in self.samples]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        text = normalize(self.samples[idx])
+        ids  = self.tokenizer.encode(text, add_special_tokens=False, truncation=False)
+
+        max_tokens = self.config.max_seq_len - 1
+        ids = ids[:max_tokens]
+
+        input_ids = [self.config.bos_token_id] + ids
+        labels    = ids + [self.config.eos_token_id]
+
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels":    torch.tensor(labels,    dtype=torch.long),
+            "true_len":  torch.tensor(len(ids),  dtype=torch.float),
+        }
+
+    def normal_indices(self) -> list[int]:
+        t = self.config.cpe_score_threshold
+        return [i for i, sc in enumerate(self._scores) if sc <= t]
+
+    def cpe_indices(self) -> list[int]:
+        t = self.config.cpe_score_threshold
+        return [i for i, sc in enumerate(self._scores) if sc > t]
+
+    def score_stats(self) -> dict:
+        import statistics
+        scores = self._scores
+        thresh = self.config.cpe_score_threshold
+        n_cpe  = sum(1 for sc in scores if sc > thresh)
+        return {
+            "total":   len(scores),
+            "n_cpe":   n_cpe,
+            "n_spe":   len(scores) - n_cpe,
+            "cpe_pct": round(n_cpe / len(scores) * 100, 2),
+            "median":  round(statistics.median(scores), 1),
+            "p95":     round(sorted(scores)[int(len(scores) * 0.95)], 1),
+        }
 
 
-def _interleaved_stream(
-    pools: dict[str, list[Path]],
-    weights: dict[str, float],
-    rng: random.Random,
-) -> Iterator[str]:
-    iters  = {name: _stream_parquet(files, rng) for name, files in pools.items()}
-    active = set(pools.keys())
+class CPEInterleaveSampler(Sampler):
+    def __init__(self, dataset: LaTeXDataset, batch_size: int, cpe_ratio: float, seed: int = 42):
+        self.normal_idx = dataset.normal_indices()
+        self.cpe_idx    = dataset.cpe_indices()
+        self.batch_size = batch_size
+        self.cpe_ratio  = cpe_ratio
+        self.seed       = seed
 
-    while active:
-        available = [s for s in pools if s in active]
-        if not available:
-            break
-        w_active = [weights[s] for s in available]
-        chosen   = rng.choices(available, weights=w_active, k=1)[0]
-        try:
-            yield next(iters[chosen])
-        except StopIteration:
-            active.discard(chosen)
+        self.n_cpe_per_batch    = max(1, round(batch_size * cpe_ratio))
+        self.n_normal_per_batch = batch_size - self.n_cpe_per_batch
+        self.n_batches          = len(self.normal_idx) // self.n_normal_per_batch
 
+    def __len__(self) -> int:
+        return self.n_batches
 
-class PretrainDataset(IterableDataset):
-    def __init__(self, tokenizer: LaTeXTokenizer, cfg: DecoderConfig, seed: int = 42, split: str = "train"):
-        super().__init__()
-        self.tokenizer = tokenizer
-        self.cfg       = cfg
-        self.seed      = seed
-        self.split     = split
-
-    def __iter__(self) -> Iterator[dict]:
+    def __iter__(self) -> Iterator[list[int]]:
         rng = random.Random(self.seed)
-        train_pools, val_pools = _get_pools(self.cfg, self.seed)
 
-        if self.split == "train":
-            weights = {
-                "raw":        self.cfg.raw_weight,
-                "light_text": self.cfg.light_weight,
-                "heavy_text": self.cfg.heavy_weight,
-            }
-            stream = _interleaved_stream(train_pools, weights, rng)
-        elif self.split == "val_raw":
-            stream = _stream_parquet(val_pools["raw"], rng)
-        elif self.split == "val_light":
-            stream = _stream_parquet(val_pools["light_text"], rng)
-        elif self.split == "val_heavy":
-            stream = _stream_parquet(val_pools["heavy_text"], rng)
-        else:
-            all_val = [f for files in val_pools.values() for f in files]
-            stream  = _stream_parquet(all_val, rng)
+        normal_pool = self.normal_idx.copy()
+        rng.shuffle(normal_pool)
 
-        current: list[int] = []
-        for text in stream:
-            ids = self.tokenizer.encode(text)
-            if len(ids) > self.cfg.max_seq_len:
-                ids = ids[:self.cfg.max_seq_len]
-            if not ids:
-                continue
+        cpe_pool = self.cpe_idx.copy()
+        rng.shuffle(cpe_pool)
+        if len(cpe_pool) < self.n_batches * self.n_cpe_per_batch:
+            repeats  = (self.n_batches * self.n_cpe_per_batch) // max(len(cpe_pool), 1) + 1
+            cpe_pool = (cpe_pool * repeats)[: self.n_batches * self.n_cpe_per_batch]
+            rng.shuffle(cpe_pool)
 
-            if len(current) + len(ids) <= self.cfg.max_seq_len:
-                current.extend(ids)
-            else:
-                if current:
-                    padded    = current + [self.cfg.pad_id] * (self.cfg.max_seq_len - len(current))
-                    input_ids = torch.tensor(padded, dtype=torch.long)
-                    yield {"input_ids": input_ids, "attention_mask": input_ids != self.cfg.pad_id}
-                current = ids
-
-        if current:
-            padded    = current + [self.cfg.pad_id] * (self.cfg.max_seq_len - len(current))
-            input_ids = torch.tensor(padded, dtype=torch.long)
-            yield {"input_ids": input_ids, "attention_mask": input_ids != self.cfg.pad_id}
+        for b in range(self.n_batches):
+            n_start   = b * self.n_normal_per_batch
+            c_start   = b * self.n_cpe_per_batch
+            batch_idx = (
+                normal_pool[n_start : n_start + self.n_normal_per_batch]
+                + cpe_pool[c_start : c_start + self.n_cpe_per_batch]
+            )
+            rng.shuffle(batch_idx)
+            yield batch_idx
 
 
-def build_dataloader(
-    dataset: PretrainDataset,
-    batch_size: int,
-    num_workers: int = 0,
-    seed: int = 42,
-) -> DataLoader:
-    g = torch.Generator()
-    g.manual_seed(seed)
+def collate_fn(batch: list[dict], pad_token_id: int = 1) -> dict:
+    max_len = max(item["input_ids"].size(0) for item in batch)
+
+    input_ids_list, labels_list, mask_list = [], [], []
+    for item in batch:
+        n   = item["input_ids"].size(0)
+        pad = max_len - n
+        input_ids_list.append(
+            torch.cat([item["input_ids"], torch.full((pad,), pad_token_id, dtype=torch.long)])
+        )
+        labels_list.append(
+            torch.cat([item["labels"], torch.full((pad,), -100, dtype=torch.long)])
+        )
+        mask_list.append(
+            torch.cat([torch.ones(n, dtype=torch.bool), torch.zeros(pad, dtype=torch.bool)])
+        )
+
+    return {
+        "input_ids":      torch.stack(input_ids_list),
+        "labels":         torch.stack(labels_list),
+        "attention_mask": torch.stack(mask_list),
+        "true_len":       torch.stack([item["true_len"] for item in batch]),
+    }
+
+
+def build_dataloader(config, split: str = "train") -> DataLoader:
+    dataset = LaTeXDataset(config)
+    pw = getattr(config, "persistent_workers", False) and config.num_workers > 0
+    pf = getattr(config, "prefetch_factor", 2) if config.num_workers > 0 else None
+
+    if split == "train" and getattr(config, "cpe_ratio", 0) > 0:
+        sampler = CPEInterleaveSampler(
+            dataset,
+            batch_size=config.batch_size,
+            cpe_ratio=config.cpe_ratio,
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            collate_fn=lambda b: collate_fn(b, pad_token_id=config.pad_token_id),
+            persistent_workers=pw,
+            prefetch_factor=pf,
+        )
+
     return DataLoader(
         dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
+        batch_size=config.batch_size,
+        shuffle=(split == "train"),
+        num_workers=config.num_workers,
         pin_memory=True,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=(2 if num_workers > 0 else None),
-        generator=g,
         drop_last=True,
+        collate_fn=lambda b: collate_fn(b, pad_token_id=config.pad_token_id),
+        persistent_workers=pw,
+        prefetch_factor=pf,
     )

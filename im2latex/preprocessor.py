@@ -1,36 +1,12 @@
 import io
-import json
 import random
-import sys
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from torch.utils.data import IterableDataset
-from huggingface_hub import hf_hub_download
-
-def get_tokenizer(repo_id: str):
-    path = hf_hub_download(repo_id=repo_id, filename="tokenizer/tokenizer.json")
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return LaTeXTokenizerV2(
-        token2id=data["token2id"],
-        id2token={int(k): v for k, v in data["id2token"].items()},
-        merges=[tuple(m) for m in data["merges"]],
-    )
-
-
-def _resize(img: Image.Image, image_height: int, max_image_width: int, patch_size: int) -> Image.Image:
-    w, h = img.size
-    new_w = int(round(w * image_height / max(h, 1)))
-    new_w = min(new_w, max_image_width)
-    new_w = max((new_w // patch_size) * patch_size, patch_size)
-    if (w, h) != (new_w, image_height):
-        img = img.resize((new_w, image_height), Image.BILINEAR)
-    return img
 
 
 def _pad_to_patch_grid(img: Image.Image, patch_size: int, max_w: int, max_h: int) -> Image.Image:
@@ -114,10 +90,6 @@ def _aug_screenshot_border(img: Image.Image) -> Image.Image:
 
 
 def apply_augmentation(img: Image.Image, aug_mode: str = "none") -> Image.Image:
-    """
-    aug_mode: 'none' | 'light' | 'heavy' | 'screenshot'
-    screenshot simulates real-world screenshot/camera domain
-    """
     if aug_mode == "none":
         return img
 
@@ -129,23 +101,9 @@ def apply_augmentation(img: Image.Image, aug_mode: str = "none") -> Image.Image:
         return img
 
     if aug_mode == "heavy":
-        if random.random() < 0.7:
-            img = _aug_brightness_contrast(img)
-        if random.random() < 0.4:
-            img = _aug_blur(img, (0.3, 1.0))
-        if random.random() < 0.3:
-            img = _aug_gaussian_noise(img, (3, 15))
-        if random.random() < 0.15:
-            img = _aug_dark_mode(img)
-        if random.random() < 0.2:
-            img = _aug_color_tint(img)
-        return img
-
-    if aug_mode == "screenshot":
-        # simulate screenshots, camera shots, PDF crops
         if random.random() < 0.5:
             img = _aug_jpeg(img, (35, 80))
-        if random.random() < 0.6:
+        if random.random() < 0.7:
             img = _aug_brightness_contrast(img)
         if random.random() < 0.5:
             img = _aug_blur(img, (0.3, 1.5))
@@ -182,20 +140,18 @@ def _process(sample: dict, tokenizer, args) -> dict:
     aug_mode = getattr(args, "aug_mode", "none")
     if aug_mode != "none":
         pil = apply_augmentation(pil, aug_mode)
-    if getattr(args, "resize_in_dataset", True):
-        img = _resize(pil, args.image_height, args.max_image_width, args.patch_size)
-    else:
-        img = _pad_to_patch_grid(
-            pil, args.patch_size, args.max_image_width,
-            getattr(args, "max_image_height", args.image_height),
-        )
+    img = _pad_to_patch_grid(
+        pil, args.patch_size, args.max_image_width,
+        getattr(args, "max_image_height", 640),
+    )
     tensor = _to_tensor(img)
     label = sample.get("latex") or sample.get("label") or ""
     ids = tokenizer.encode(label)
     if len(ids) > args.max_token_len:
         ids = ids[:args.max_token_len]
+    pad_id         = tokenizer.pad_token_id
     pad_len        = args.max_token_len - len(ids)
-    input_ids      = torch.tensor(ids + [0] * pad_len, dtype=torch.long)
+    input_ids      = torch.tensor(ids + [pad_id] * pad_len, dtype=torch.long)
     attention_mask = torch.tensor([1] * len(ids) + [0] * pad_len, dtype=torch.long)
     lab            = input_ids.clone()
     lab[attention_mask == 0] = -100
@@ -207,68 +163,77 @@ def _process(sample: dict, tokenizer, args) -> dict:
     }
 
 
-class Nav2TexHFDataset(IterableDataset):
-    def __init__(self, dataset_id: str, split: str, tokenizer, args,
-                 rank: int = 0, world_size: int = 1,
-                 names: list[str] | None = None,
-                 weights: list[float] | None = None,
-                 seed: int = 42):
-        from datasets import load_dataset, interleave_datasets
-        self.tokenizer = tokenizer
-        self.args      = args
-        self.rank      = rank
-        self.world_size = world_size
-        self.seed      = seed
-
-        if names and split == "train":
-            subsets = []
-            for name in names:
-                ds = load_dataset(
-                    dataset_id,
-                    data_files={"train": f"train/{name}/*.parquet"},
-                    split="train",
-                    streaming=True,
-                )
-                subsets.append(ds)
-            probs = None
-            if weights:
-                total = sum(weights)
-                probs = [w / total for w in weights]
-            self.ds = interleave_datasets(subsets, probabilities=probs, seed=seed)
-        else:
-            self.ds = load_dataset(dataset_id, split=split, streaming=True)
-
-        if world_size > 1:
-            self.ds = self.ds.filter(lambda _, idx: idx % world_size == rank, with_indices=True)
-
-    def __iter__(self):
-        for sample in self.ds:
-            try:
-                yield _process(sample, self.tokenizer, self.args)
-            except Exception:
-                pass
-
-
-class Nav2TexDiskDataset(IterableDataset):
-    def __init__(self, cache_path: str, tokenizer, args, rank: int = 0, world_size: int = 1):
-        from datasets import load_from_disk
-        self.ds          = load_from_disk(cache_path)
+class Nav2TexTrainDataset(IterableDataset):
+    def __init__(
+        self,
+        train_dir: str,
+        sources: list[str],
+        weights: list[float],
+        tokenizer,
+        args,
+        rank: int = 0,
+        world_size: int = 1,
+        seed: int = 42,
+    ):
         self.tokenizer   = tokenizer
         self.args        = args
         self.rank        = rank
         self.world_size  = world_size
-        self.num_samples = len(self.ds) // world_size
+        self.seed        = seed
 
-    def __len__(self):
-        return self.num_samples
+        self.source_files: dict[str, list[Path]] = {}
+        self.weights: dict[str, float] = {}
+        for src, w in zip(sources, weights):
+            files = sorted((Path(train_dir) / src).glob("*.parquet"))
+            if files:
+                self.source_files[src] = files
+                self.weights[src] = w
+
+    def _stream_source(self, files: list[Path], rng):
+        import pyarrow.parquet as pq
+        for pfile in files:
+            table = pq.read_table(str(pfile), columns=["image", "latex"])
+            indices = list(range(len(table)))
+            rng.shuffle(indices)
+            images = table["image"].to_pylist()
+            latexs = table["latex"].to_pylist()
+            for i in indices:
+                img_raw = images[i]
+                lat = latexs[i]
+                if not lat or not isinstance(lat, str) or not lat.strip() or img_raw is None:
+                    continue
+                yield {"image": img_raw, "latex": lat.strip()}
 
     def __iter__(self):
-        for i, sample in enumerate(self.ds):
-            if i % self.world_size == self.rank:
-                yield _process(sample, self.tokenizer, self.args)
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id   = worker_info.id if worker_info else 0
+        num_workers = worker_info.num_workers if worker_info else 1
+        rng = random.Random(self.seed + worker_id + self.rank * 1000)
+
+        iters  = {src: self._stream_source(files, rng) for src, files in self.source_files.items()}
+        active = set(iters.keys())
+        names  = list(iters.keys())
+        global_idx = 0
+
+        while active:
+            avail   = [s for s in names if s in active]
+            w_avail = [self.weights[s] for s in avail]
+            chosen  = rng.choices(avail, weights=w_avail, k=1)[0]
+            try:
+                sample = next(iters[chosen])
+            except StopIteration:
+                active.discard(chosen)
+                continue
+
+            if global_idx % num_workers == worker_id:
+                try:
+                    yield _process(sample, self.tokenizer, self.args)
+                except Exception:
+                    pass
+            global_idx += 1
 
 
-class Nav2TexFlatParquetDataset(IterableDataset):
+class Nav2TexValDataset(IterableDataset):
     def __init__(
         self,
         val_dir: str,
@@ -286,7 +251,6 @@ class Nav2TexFlatParquetDataset(IterableDataset):
         self.seed       = seed
 
     def __iter__(self):
-        import random
         import pyarrow.parquet as pq
         worker_info = torch.utils.data.get_worker_info()
         worker_id   = worker_info.id if worker_info else 0
@@ -312,79 +276,3 @@ class Nav2TexFlatParquetDataset(IterableDataset):
                     except Exception:
                         pass
                 global_idx += 1
-
-
-class Nav2TexParquetDataset(IterableDataset):
-
-    def __init__(
-        self,
-        data_dir: str,
-        sources: list[str],
-        weights: list[float],
-        tokenizer,
-        args,
-        rank: int = 0,
-        world_size: int = 1,
-        seed: int = 42,
-    ):
-        self.data_dir   = Path(data_dir)
-        self.tokenizer  = tokenizer
-        self.args       = args
-        self.rank       = rank
-        self.world_size = world_size
-        self.seed       = seed
-
-        self.source_files: dict[str, list[Path]] = {}
-        self.weights: dict[str, float] = {}
-        for src, w in zip(sources, weights):
-            files = sorted((self.data_dir / src).glob("*.parquet"))
-            if files:
-                self.source_files[src] = files
-                self.weights[src] = w
-
-    def _stream_source(self, files: list[Path], rng):
-        import pyarrow.parquet as pq
-        for pfile in files:
-            table = pq.read_table(str(pfile), columns=["image", "latex"])
-            indices = list(range(len(table)))
-            rng.shuffle(indices)
-            images = table["image"].to_pylist()
-            latexs = table["latex"].to_pylist()
-            for i in indices:
-                img_raw = images[i]
-                lat = latexs[i]
-                if not lat or not isinstance(lat, str) or not lat.strip():
-                    continue
-                if img_raw is None:
-                    continue
-                yield {"image": img_raw, "latex": lat.strip()}
-
-    def __iter__(self):
-        import random
-        worker_info = torch.utils.data.get_worker_info()
-        worker_id   = worker_info.id if worker_info else 0
-        num_workers = worker_info.num_workers if worker_info else 1
-        rng = random.Random(self.seed + worker_id + self.rank * 1000)
-
-        iters  = {src: self._stream_source(files, rng) for src, files in self.source_files.items()}
-        active = set(iters.keys())
-        names  = list(iters.keys())
-
-        global_idx = 0
-        while active:
-            avail   = [s for s in names if s in active]
-            w_avail = [self.weights[s] for s in avail]
-            chosen  = rng.choices(avail, weights=w_avail, k=1)[0]
-            try:
-                sample = next(iters[chosen])
-            except StopIteration:
-                active.discard(chosen)
-                continue
-
-            if global_idx % num_workers == worker_id:
-                try:
-                    yield _process(sample, self.tokenizer, self.args)
-                except Exception:
-                    pass
-            global_idx += 1
-        

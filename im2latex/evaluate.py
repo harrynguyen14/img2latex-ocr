@@ -27,10 +27,8 @@ def compute_metrics(predictions: list, references: list) -> dict:
 
     bleu = corpus_bleu(ref, hyp, smoothing_function=SmoothingFunction().method1)
 
-    # Token-level exact match — nhất quán với BLEU và edit_distance
     exact = sum(h == r[0] for h, r in zip(hyp, ref)) / max(len(ref), 1)
 
-    # Tái dùng hyp/ref đã tokenize, tránh gọi tokenize_latex 4 lần/cặp
     eds = [
         edit_distance(h, r[0]) / max(len(h), len(r[0]), 1)
         for h, r in zip(hyp, ref)

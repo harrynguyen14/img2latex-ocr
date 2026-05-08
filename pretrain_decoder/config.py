@@ -1,90 +1,63 @@
-import json
-from dataclasses import dataclass, asdict
+import argparse
 from pathlib import Path
 
-
-@dataclass
-class DecoderConfig:
-    vocab_size:       int   = 2046
-    pad_id:           int   = 0
-    bos_id:           int   = 2
-    eos_id:           int   = 3
-
-    d_model:          int   = 512
-    n_heads:          int   = 8
-    n_layers:         int   = 6
-    d_ff:             int   = 1408
-    dropout:          float = 0.1
-    max_seq_len:      int   = 200
-    rope_theta:       float = 10000.0
-    tie_weights:      bool  = True
-
-    pack_sequences:   bool  = True
-    batch_size:       int   = 128
-    grad_accum_steps: int   = 4
-
-    lr:               float = 3e-4
-    weight_decay:     float = 0.1
-    beta1:            float = 0.9
-    beta2:            float = 0.95
-    eps:              float = 1e-8
-    grad_clip:        float = 1.0
-
-    warmup_steps:     int   = 2000
-    max_steps:        int   = 100_000
-
-    dtype:            str   = "bfloat16"
-
-    save_every_steps:        int   = 2_000
-    eval_every_steps:        int   = 1_000
-    keep_last_n_ckpt:        int   = 3
-    log_every_steps:         int   = 100
-    early_stopping_patience: int   = 10
-    num_workers:             int   = 4
-    compile:                 bool  = True
-
-    tokenizer_dir:    str   = "D:/img2latex/tokenizer"
-    out_dir:          str   = "D:/img2latex/pretrain_decoder/checkpoints"
-    data_dir:         str   = "D:/dataset-ocr-builder/latex-ocr-dataset"
-
-    raw_ratio:        float = 0.70
-    light_ratio:      float = 0.70
-    heavy_ratio:      float = 0.30
-
-    raw_weight:       float = 2.0
-    light_weight:     float = 4.0
-    heavy_weight:     float = 1.0
-
-    @property
-    def head_dim(self) -> int:
-        assert self.d_model % self.n_heads == 0
-        return self.d_model // self.n_heads
-
-    def save(self, path: str | Path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2)
-
-    @classmethod
-    def load(cls, path: str | Path) -> "DecoderConfig":
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return cls(**d)
-
-    def __repr__(self) -> str:
-        return (
-            f"DecoderConfig("
-            f"n_layers={self.n_layers}, d_model={self.d_model}, "
-            f"n_heads={self.n_heads}, d_ff={self.d_ff}, "
-            f"max_seq_len={self.max_seq_len}, vocab={self.vocab_size})"
-        )
+_DEFAULT_TOKENIZER_DIR = str(Path(__file__).parent / "tokenizer")
+_DEFAULT_DATA_GLOB     = "/workspace/data/*.parquet"
+_DEFAULT_SAVE_DIR      = "/workspace/checkpoints"
 
 
-if __name__ == "__main__":
-    cfg = DecoderConfig()
-    print(cfg)
-    cfg.save("/tmp/test_cfg.json")
-    loaded = DecoderConfig.load("/tmp/test_cfg.json")
-    assert asdict(loaded) == asdict(cfg)
-    print("save/load OK")
+def get_config():
+    p = argparse.ArgumentParser(description="Pretrain LaTeX decoder")
+
+    # tokenizer
+    p.add_argument("--tokenizer-dir",  default=_DEFAULT_TOKENIZER_DIR)
+    p.add_argument("--vocab-size",     type=int,   default=50000)
+    p.add_argument("--pad-token-id",   type=int,   default=1)
+    p.add_argument("--bos-token-id",   type=int,   default=0)
+    p.add_argument("--eos-token-id",   type=int,   default=2)
+
+    # data
+    p.add_argument("--data-glob",            default=_DEFAULT_DATA_GLOB)
+    p.add_argument("--max-seq-len",          type=int,   default=1024)
+    p.add_argument("--cpe-score-threshold",  type=int,   default=400)
+    p.add_argument("--cpe-ratio",            type=float, default=0.20)
+
+    # model
+    p.add_argument("--d-model",       type=int,   default=1024)
+    p.add_argument("--n-heads",       type=int,   default=16)
+    p.add_argument("--n-layers",      type=int,   default=8)
+    p.add_argument("--d-ff",          type=int,   default=4096)
+    p.add_argument("--dropout",       type=float, default=0.1)
+    p.add_argument("--squeeze-ratio", type=int,   default=4)
+
+    # LAM
+    p.add_argument("--lam-lambda",   type=float, default=0.1)
+
+    # training
+    p.add_argument("--batch-size",       type=int,   default=32)
+    p.add_argument("--grad-accum",       type=int,   default=4)
+    p.add_argument("--max-epochs",       type=int,   default=10)
+    p.add_argument("--warmup-steps",     type=int,   default=1000)
+    p.add_argument("--lr",               type=float, default=1e-4)
+    p.add_argument("--weight-decay",     type=float, default=0.01)
+    p.add_argument("--max-grad-norm",    type=float, default=1.0)
+    p.add_argument("--label-smoothing",  type=float, default=0.1)
+
+    # checkpoint
+    p.add_argument("--save-dir",           default=_DEFAULT_SAVE_DIR)
+    p.add_argument("--save-every-n-steps", type=int, default=2000)
+    p.add_argument("--log-every-n-steps",  type=int, default=100)
+
+    # hardware
+    p.add_argument("--num-workers",        type=int,            default=4)
+    p.add_argument("--prefetch-factor",    type=int,            default=2)
+    p.add_argument("--persistent-workers", action="store_true", default=False)
+    p.add_argument("--cuda-benchmark",     action="store_true", default=False)
+    p.add_argument("--bf16",               action="store_true", default=True)
+    p.add_argument("--no-bf16",            action="store_false", dest="bf16")
+    p.add_argument("--compile",            action="store_true", default=False)
+    p.add_argument("--flash-attn",         action="store_true", default=False)
+
+    args = p.parse_args()
+    cfg = argparse.Namespace(**{k.replace("-", "_"): v for k, v in vars(args).items()})
+    return cfg

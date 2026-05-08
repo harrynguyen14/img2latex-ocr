@@ -1,101 +1,282 @@
-import argparse
+import contextlib
+import json
+import math
+import time
 from pathlib import Path
 
-from config import DecoderConfig
-from pretrain import train
+import torch
+import torch.nn as nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+from safetensors.torch import save_file, load_file
+from tqdm import tqdm
 
+from config import get_config
+from dataset import build_dataloader
+from model import DecoderLM
 
-def parse_args():
-    ap = argparse.ArgumentParser(description="Pretrain LaTeX causal decoder")
+def _flatten_tensors(d: dict, prefix: str) -> tuple[dict, dict]:
+    """Recursively flatten nested dict into {prefix/key: tensor}, non-tensors into scalars dict."""
+    tensors, scalars = {}, {}
+    for k, v in d.items():
+        full_key = f"{prefix}/{k}"
+        if isinstance(v, torch.Tensor):
+            tensors[full_key] = v.cpu()
+        elif isinstance(v, dict):
+            t, s = _flatten_tensors(v, full_key)
+            tensors.update(t)
+            scalars.update(s)
+        else:
+            scalars[full_key] = v
+    return tensors, scalars
 
-    ap.add_argument("--config",          type=str,   default=None)
-    ap.add_argument("--n-layers",        type=int,   default=6)
-    ap.add_argument("--d-model",         type=int,   default=512)
-    ap.add_argument("--n-heads",         type=int,   default=8)
-    ap.add_argument("--d-ff",            type=int,   default=1408)
-    ap.add_argument("--max-seq-len",     type=int,   default=200)
-    ap.add_argument("--vocab-size",      type=int,   default=2046)
-    ap.add_argument("--lr",              type=float, default=3e-4)
-    ap.add_argument("--batch-size",      type=int,   default=128)
-    ap.add_argument("--grad-accum",      type=int,   default=4)
-    ap.add_argument("--max-steps",       type=int,   default=100_000)
-    ap.add_argument("--warmup-steps",    type=int,   default=2000)
-    ap.add_argument("--grad-clip",       type=float, default=1.0)
-    ap.add_argument("--weight-decay",    type=float, default=0.1)
-    ap.add_argument("--dropout",         type=float, default=0.1)
-    ap.add_argument("--dtype",           type=str,   default="bfloat16",
-                    choices=["float32", "float16", "bfloat16"])
-    ap.add_argument("--save-every",      type=int,   default=2_000)
-    ap.add_argument("--eval-every",      type=int,   default=1_000)
-    ap.add_argument("--log-every",       type=int,   default=100)
-    ap.add_argument("--keep-last-n",     type=int,   default=3)
-    ap.add_argument("--patience",        type=int,   default=10)
-    ap.add_argument("--num-workers",     type=int,   default=4)
-    ap.add_argument("--compile",         action="store_true")
-    ap.add_argument("--tokenizer-dir",   type=str,
-                    default="/workspace/tokenizer")
-    ap.add_argument("--out-dir",         type=str,
-                    default="/workspace/checkpoints")
-    ap.add_argument("--data-dir",        type=str,
-                    default="/workspace/data")
-    ap.add_argument("--raw-ratio",       type=float, default=0.70)
-    ap.add_argument("--light-ratio",     type=float, default=0.70)
-    ap.add_argument("--heavy-ratio",     type=float, default=0.30)
-    ap.add_argument("--raw-weight",      type=float, default=2.0)
-    ap.add_argument("--light-weight",    type=float, default=4.0)
-    ap.add_argument("--heavy-weight",    type=float, default=1.0)
-    ap.add_argument("--no-resume",        action="store_true")
-    ap.add_argument("--resume-from",      type=str, default=None,
-                    help="Path to specific checkpoint dir to resume from")
-    ap.add_argument("--seed",            type=int,   default=42)
+def _unflatten_tensors(tensors: dict, scalars: dict, prefix: str) -> dict:
+    """Reconstruct nested dict from flat tensors + scalars under a given prefix."""
+    result = {}
+    sub_prefix = prefix + "/"
+    for key, val in tensors.items():
+        if key.startswith(sub_prefix):
+            parts = key[len(sub_prefix):].split("/")
+            node = result
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = val
+    for key, val in scalars.items():
+        if key.startswith(sub_prefix):
+            parts = key[len(sub_prefix):].split("/")
+            node = result
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = val
+    return result
 
-    return ap.parse_args()
+def _make_scheduler(optimizer, config, total_steps) -> LambdaLR:
+    def lr_lambda(step: int) -> float:
+        if step < config.warmup_steps:
+            return step / max(1, config.warmup_steps)
+        progress = (step - config.warmup_steps) / max(1, total_steps - config.warmup_steps)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+    return LambdaLR(optimizer, lr_lambda)
 
+def _make_optimizer(model: DecoderLM, config) -> AdamW:
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "norm" in name or "bias" in name or (name.endswith(".weight") and param.dim() == 1):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return AdamW(
+        [
+            {"params": decay,    "weight_decay": config.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=config.lr,
+    )
 
-def main():
-    args = parse_args()
+def _find_latest_checkpoint(save_dir: Path) -> Path | None:
+    ckpts = sorted(save_dir.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
+    return ckpts[-1] if ckpts else None
 
-    if args.config:
-        cfg = DecoderConfig.load(args.config)
-    else:
-        cfg = DecoderConfig(
-            n_layers                 = args.n_layers,
-            d_model                  = args.d_model,
-            n_heads                  = args.n_heads,
-            d_ff                     = args.d_ff,
-            max_seq_len              = args.max_seq_len,
-            vocab_size               = args.vocab_size,
-            lr                       = args.lr,
-            batch_size               = args.batch_size,
-            grad_accum_steps         = args.grad_accum,
-            max_steps                = args.max_steps,
-            warmup_steps             = args.warmup_steps,
-            grad_clip                = args.grad_clip,
-            weight_decay             = args.weight_decay,
-            dropout                  = args.dropout,
-            dtype                    = args.dtype,
-            save_every_steps         = args.save_every,
-            eval_every_steps         = args.eval_every,
-            log_every_steps          = args.log_every,
-            keep_last_n_ckpt         = args.keep_last_n,
-            early_stopping_patience  = args.patience,
-            num_workers              = args.num_workers,
-            compile                  = args.compile,
-            tokenizer_dir            = args.tokenizer_dir,
-            out_dir                  = args.out_dir,
-            data_dir                 = args.data_dir,
-            raw_ratio                = args.raw_ratio,
-            light_ratio              = args.light_ratio,
-            heavy_ratio              = args.heavy_ratio,
-            raw_weight               = args.raw_weight,
-            light_weight             = args.light_weight,
-            heavy_weight             = args.heavy_weight,
-        )
+def _save_checkpoint(model, optimizer, scheduler, config, step: int, loss: float, save_dir: Path):
+    ckpt_dir = save_dir / f"step_{step:08d}"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    print(cfg)
-    resume = args.resume_from if args.resume_from else (not args.no_resume)
-    train(cfg, resume=resume)
+    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    model_sd = {k: v.cpu() for k, v in raw_model.state_dict().items()}
+    save_file(model_sd, ckpt_dir / "model.safetensors")
 
+    opt_tensors, opt_scalars = _flatten_tensors(optimizer.state_dict(), "optimizer")
+    sch_tensors, sch_scalars = _flatten_tensors({"state": scheduler.state_dict()}, "scheduler")
+    trainer_tensors = {**opt_tensors, **sch_tensors}
+    trainer_scalars = {**opt_scalars, **sch_scalars, "step": step, "loss": loss}
+    metadata = {k: json.dumps(v) for k, v in trainer_scalars.items()}
+    if not trainer_tensors:
+        trainer_tensors["_sentinel"] = torch.zeros(1)
+    save_file(trainer_tensors, ckpt_dir / "trainer.safetensors", metadata=metadata)
+
+    with open(ckpt_dir / "config.json", "w") as f:
+        json.dump(vars(config), f, indent=2)
+
+    import shutil
+    tok_src = Path(config.tokenizer_dir)
+    for fname in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "preprocessor_config.json"):
+        src = tok_src / fname
+        if src.exists():
+            shutil.copy2(src, ckpt_dir / fname)
+
+def _load_checkpoint(model, optimizer, scheduler, ckpt_dir: Path, device) -> int:
+    sd = load_file(ckpt_dir / "model.safetensors", device="cpu")
+    sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in sd.items()}
+    model.load_state_dict(sd)
+
+    trainer_tensors = load_file(ckpt_dir / "trainer.safetensors", device="cpu")
+    trainer_tensors.pop("_sentinel", None)
+    from safetensors import safe_open
+    with safe_open(ckpt_dir / "trainer.safetensors", framework="pt", device="cpu") as f:
+        metadata = f.metadata()
+    trainer_scalars = {k: json.loads(v) for k, v in metadata.items()}
+
+    opt_sd  = _unflatten_tensors(trainer_tensors, trainer_scalars, "optimizer")
+    sch_sd  = _unflatten_tensors(trainer_tensors, trainer_scalars, "scheduler")
+    sch_sd  = sch_sd.get("state", sch_sd)
+
+    for state in opt_sd.get("state", {}).values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+
+    optimizer.load_state_dict(opt_sd)
+    scheduler.load_state_dict(sch_sd)
+    return int(trainer_scalars["step"])
+
+def train():
+    config   = get_config()
+    save_dir = Path(config.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if config.cuda_benchmark and device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    print(f"device={device}  bf16={config.bf16}  cudnn_benchmark={config.cuda_benchmark}")
+
+    loader = build_dataloader(config, split="train")
+
+    stats = loader.dataset.score_stats()
+    print(
+        f"dataset: total={stats['total']}  "
+        f"spe={stats['n_spe']} ({100-stats['cpe_pct']}%)  "
+        f"cpe={stats['n_cpe']} ({stats['cpe_pct']}%)  "
+        f"score_median={stats['median']}  score_p95={stats['p95']}"
+    )
+
+    steps_per_epoch = len(loader) // config.grad_accum
+    total_steps     = steps_per_epoch * config.max_epochs
+    print(f"steps_per_epoch={steps_per_epoch}  total_steps={total_steps}")
+
+    model     = DecoderLM(config).to(device)
+    print(f"parameters: {model.num_parameters() / 1e6:.1f}M")
+
+    optimizer = _make_optimizer(model, config)
+    scheduler = _make_scheduler(optimizer, config, total_steps)
+    use_bf16  = config.bf16 and device.type == "cuda"
+    amp_ctx   = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16)
+
+    start_step = 0
+    latest = _find_latest_checkpoint(save_dir)
+    if latest is not None:
+        print(f"resuming from {latest}")
+        start_step = _load_checkpoint(model, optimizer, scheduler, latest, device)
+        print(f"resumed at step {start_step}")
+
+    if config.compile:
+        print("torch.compile: compiling model...")
+        model = torch.compile(model)
+        print("torch.compile: done")
+
+    model.train()
+    step              = start_step
+    data_iter         = iter(loader)
+    running_loss      = 0.0
+    running_lm_loss   = 0.0
+    running_len_loss  = 0.0
+    running_gnorm     = 0.0
+    tokens_seen       = 0
+    t0                = time.perf_counter()
+
+    pbar = tqdm(total=total_steps, initial=start_step, desc="train", dynamic_ncols=True)
+
+    while step < total_steps:
+        optimizer.zero_grad(set_to_none=True)
+        accum_loss     = 0.0
+        accum_lm_loss  = 0.0
+        accum_len_loss = 0.0
+        batch_tokens   = 0
+
+        for _ in range(config.grad_accum):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(loader)
+                batch = next(data_iter)
+
+            input_ids      = batch["input_ids"].to(device)
+            labels         = batch["labels"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            true_len       = batch["true_len"].to(device)
+            batch_tokens  += attention_mask.sum().item()
+
+            with amp_ctx:
+                _sdp_backends = (
+                    [SDPBackend.FLASH_ATTENTION]
+                    if config.flash_attn
+                    else [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+                )
+                _sdp_ctx = (
+                    sdpa_kernel(_sdp_backends)
+                    if device.type == "cuda"
+                    else contextlib.nullcontext()
+                )
+                with _sdp_ctx:
+                    loss, lm_loss, len_loss = model(
+                        input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        true_len=true_len,
+                    )
+                    loss = loss / config.grad_accum
+
+            loss.backward()
+            accum_loss     += loss.item()
+            accum_lm_loss  += lm_loss.item() / config.grad_accum
+            accum_len_loss += len_loss.item() / config.grad_accum
+
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm).item()
+        optimizer.step()
+        scheduler.step()
+
+        step             += 1
+        running_loss     += accum_loss
+        running_lm_loss  += accum_lm_loss
+        running_len_loss += accum_len_loss
+        running_gnorm    += grad_norm
+        tokens_seen      += batch_tokens
+
+        pbar.update(1)
+
+        if step % config.log_every_n_steps == 0:
+            elapsed     = time.perf_counter() - t0
+            tok_per_sec = tokens_seen / elapsed if elapsed > 0 else 0
+            n           = config.log_every_n_steps
+            avg_loss    = running_loss     / n
+            avg_lm      = running_lm_loss  / n
+            avg_len     = running_len_loss / n
+            avg_gnorm   = running_gnorm    / n
+            lr_now      = scheduler.get_last_lr()[0]
+            pbar.set_postfix(
+                loss=f"{avg_loss:.4f}", lm=f"{avg_lm:.4f}", len=f"{avg_len:.4f}",
+                gnorm=f"{avg_gnorm:.3f}", lr=f"{lr_now:.2e}", tok_s=f"{tok_per_sec:,.0f}",
+            )
+            tqdm.write(
+                f"step={step:>7d}  loss={avg_loss:.4f}  lm={avg_lm:.4f}  len={avg_len:.4f}"
+                f"  gnorm={avg_gnorm:.3f}  lr={lr_now:.2e}  tok/s={tok_per_sec:,.0f}"
+            )
+            running_loss     = 0.0
+            running_lm_loss  = 0.0
+            running_len_loss = 0.0
+            running_gnorm    = 0.0
+            tokens_seen      = 0
+            t0               = time.perf_counter()
+
+        if step % config.save_every_n_steps == 0:
+            _save_checkpoint(model, optimizer, scheduler, config, step, accum_loss, save_dir)
+            tqdm.write(f"  checkpoint saved at step {step}")
+
+    pbar.close()
+    _save_checkpoint(model, optimizer, scheduler, config, step, accum_loss, save_dir)
+    print(f"training complete at step {step}")
 
 if __name__ == "__main__":
-    main()
+    train()
