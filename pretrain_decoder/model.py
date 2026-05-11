@@ -281,6 +281,8 @@ class DecoderLM(nn.Module):
         weights_path = _download("model.safetensors")
         sd = load_file(weights_path, device=device)
         sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in sd.items()}
-        model.load_state_dict(sd)
+        # lm_head.weight is tied to token_embed.weight at construction time,
+        # so it is not stored in the checkpoint — strict=False skips the missing key.
+        model.load_state_dict(sd, strict=False)
         model.eval()
         return model
