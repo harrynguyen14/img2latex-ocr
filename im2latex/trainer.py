@@ -231,6 +231,8 @@ class Trainer:
         self.sources              = list(getattr(args, "sources", []))
         self.weight_stages        = _parse_weight_stages(getattr(args, "weight_stages", ""), self.sources)
         self.active_weight_stage  = -1
+        self.early_stopping_patience = getattr(args, "early_stopping_patience", 0)
+        self.early_stopping_counter  = 0
 
         self.model = LaTeXOCRModel(
             vars(args) if not isinstance(args, dict) else args,
@@ -439,9 +441,16 @@ class Trainer:
 
                 if val_metrics["val_ppl"] < self.best_val_ppl:
                     self.best_val_ppl = val_metrics["val_ppl"]
+                    self.early_stopping_counter = 0
                     _save_best(self.model, self.optimizer, self.scheduler,
                                self.global_step, self.ckpt_dir / "best", self.tokenizer)
                     tqdm.write(f"  [best] val_ppl={self.best_val_ppl:.2f}")
+                elif self.early_stopping_patience > 0:
+                    self.early_stopping_counter += 1
+                    tqdm.write(f"  [early_stop] no improvement {self.early_stopping_counter}/{self.early_stopping_patience}")
+                    if self.early_stopping_counter >= self.early_stopping_patience:
+                        tqdm.write(f"  [early_stop] stopping at step {self.global_step}")
+                        break
 
             if self.global_step % eval_steps == 0:
                 ebs = getattr(args, "eval_batch_size", 1)

@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 from typing import List
 from functools import partial
@@ -180,8 +181,8 @@ class Transformer(nn.Module):
 
     def forward(self, x, mask=None, attn_mask=None, positions=None, cu_seqlens=None, max_seqlen=None):
         for block in self.layers:
-            x = block(x, mask=mask, attn_mask=attn_mask, positions=positions,
-                      cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x = checkpoint(block, x, mask, attn_mask, positions, cu_seqlens, max_seqlen,
+                           use_reentrant=False)
         return self.norm(x)
 
 

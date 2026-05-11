@@ -72,6 +72,8 @@ def parse_args():
 
     ap.add_argument("--max_new_tokens",       type=int,   default=1024)
     ap.add_argument("--num_beams",            type=int,   default=1)
+    ap.add_argument("--early_stopping_patience", type=int, default=0,
+                    help="Stop if val_ppl does not improve for this many val checks. 0 = disabled.")
 
     return ap.parse_args()
 
