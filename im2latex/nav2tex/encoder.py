@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 from typing import List
 from functools import partial

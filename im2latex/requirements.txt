@@ -8,3 +8,4 @@ pyarrow
 Pillow
 tqdm
 nltk
+bitsandbytes

@@ -8,6 +8,12 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+
+try:
+    import bitsandbytes as bnb
+    HAS_BNB = True
+except ImportError:
+    HAS_BNB = False
 from tqdm import tqdm
 
 try:
@@ -32,19 +38,35 @@ def cosine_with_warmup(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float) -> AdamW:
+def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float):
     no_decay = {
         n for n, p in model.named_parameters()
         if p.requires_grad and (p.ndim < 2 or "norm" in n.lower() or n.endswith(".bias"))
     }
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    return AdamW(
-        [
-            {"params": [p for n, p in trainable if n not in no_decay], "weight_decay": weight_decay},
-            {"params": [p for n, p in trainable if n in no_decay],     "weight_decay": 0.0},
-        ],
-        lr=lr, betas=(0.9, 0.95), eps=1e-8,
-    )
+
+    decoder_wd  = [p for n, p in trainable if n.startswith("decoder.") and n not in no_decay]
+    decoder_nd  = [p for n, p in trainable if n.startswith("decoder.") and n in no_decay]
+    encoder_wd  = [p for n, p in trainable if not n.startswith("decoder.") and n not in no_decay]
+    encoder_nd  = [p for n, p in trainable if not n.startswith("decoder.") and n in no_decay]
+
+    if HAS_BNB:
+        # 8-bit Adam for decoder params saves ~50% optimizer state memory
+        opt_cls = bnb.optim.AdamW8bit
+    else:
+        opt_cls = AdamW
+
+    param_groups = []
+    if encoder_wd: param_groups.append({"params": encoder_wd, "weight_decay": weight_decay, "optim_bits": 32})
+    if encoder_nd: param_groups.append({"params": encoder_nd, "weight_decay": 0.0,          "optim_bits": 32})
+    if decoder_wd: param_groups.append({"params": decoder_wd, "weight_decay": weight_decay})
+    if decoder_nd: param_groups.append({"params": decoder_nd, "weight_decay": 0.0})
+
+    if not HAS_BNB:
+        for g in param_groups:
+            g.pop("optim_bits", None)
+
+    return opt_cls(param_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8)
 
 
 def _load_model_state(model: LaTeXOCRModel, state: dict, strict: bool = True) -> None:
