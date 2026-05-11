@@ -6,12 +6,7 @@ from typing import List
 from functools import partial
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 
-try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import unpad_input, pad_input
-    HAS_FLASH_ATTN = True
-except ImportError:
-    HAS_FLASH_ATTN = False
+HAS_FLASH_ATTN = False  # flash-attn-3 package present but broken; use SDPA path
 
 
 def exists(val):
@@ -127,57 +122,35 @@ class Attention(nn.Module):
             h_idx, w_idx = positions
             q, k = apply_2d_rope(q, k, h_idx, w_idx)
 
-        if self.use_flash_attn and HAS_FLASH_ATTN and x.is_cuda:
-            fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
-            q_ = rearrange(q, 'b h n d -> b n h d').contiguous().to(fa_dtype)
-            k_ = rearrange(k, 'b h n d -> b n h d').contiguous().to(fa_dtype)
-            v_ = rearrange(v, 'b h n d -> b n h d').contiguous().to(fa_dtype)
-            dropout_p = self.dropout.p if self.training else 0.0
+        dropout_p = self.dropout.p if self.training else 0.0
 
-            if exists(cu_seqlens) and exists(max_seqlen):
-                # Varlen path: cu_seqlens encodes block boundaries (NaViT packed images).
-                # q_/k_/v_ are already unpadded (B=1, total_tokens, H, D).
-                q_flat = q_.squeeze(0)
-                k_flat = k_.squeeze(0)
-                v_flat = v_.squeeze(0)
-                out_flat = flash_attn_varlen_func(
-                    q_flat, k_flat, v_flat,
-                    cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-                    max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
-                    dropout_p=dropout_p,
-                    causal=False,
-                )
-                out = out_flat.unsqueeze(0)
-            elif exists(mask):
-                B, N = mask.shape
-                q_unpad, indices, cu_seqlens_q, max_seqlen_q, *_ = unpad_input(q_, mask)
-                k_unpad = k_[mask]
-                v_unpad = v_[mask]
-                out_unpad = flash_attn_varlen_func(
-                    q_unpad, k_unpad, v_unpad,
-                    cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_q,
-                    dropout_p=dropout_p,
-                    causal=False,
-                )
-                out = pad_input(out_unpad, indices, B, N)
-            else:
-                out = flash_attn_func(q_, k_, v_, dropout_p=dropout_p, causal=False)
-            out = rearrange(out, 'b n h d -> b n (h d)').to(x.dtype)
+        if exists(cu_seqlens) and exists(max_seqlen):
+            # Varlen SDPA: split flat sequence at image boundaries, run SDPA per-image
+            # with no mask so PyTorch can select its fastest kernel (FA3 on Blackwell).
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            outs = []
+            offset = 0
+            for slen in seqlens:
+                slen = int(slen)
+                qi = q[:, :, offset:offset + slen, :]
+                ki = k[:, :, offset:offset + slen, :]
+                vi = v[:, :, offset:offset + slen, :]
+                oi = F.scaled_dot_product_attention(qi, ki, vi, dropout_p=dropout_p)
+                outs.append(oi)
+                offset += slen
+            out = torch.cat(outs, dim=2)
+            out = rearrange(out, 'b h n d -> b n (h d)')
         else:
-            dropout_p = self.dropout.p if self.training else 0.0
             combined_mask = None
             if exists(mask):
                 combined_mask = mask[:, None, None, :]
             if exists(attn_mask):
                 combined_mask = attn_mask if combined_mask is None else (combined_mask & attn_mask)
             if combined_mask is not None:
-                combined_mask = combined_mask.expand(q.shape[0], self.heads, q.shape[2], k.shape[2])
-            out = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=combined_mask,
-                dropout_p=dropout_p,
-            )
+                combined_mask = torch.zeros_like(combined_mask, dtype=q.dtype).masked_fill(
+                    ~combined_mask, float('-inf')
+                )
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=combined_mask, dropout_p=dropout_p)
             out = rearrange(out, 'b h n d -> b n (h d)')
 
         return self.to_out(out)
