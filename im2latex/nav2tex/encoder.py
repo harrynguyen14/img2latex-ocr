@@ -263,59 +263,34 @@ class NaViT_Encoder(nn.Module):
             batched_positions.append(torch.cat(positions, dim=0))
             batched_seg_lens.append(seg_lens)
 
-        use_varlen = HAS_FLASH_ATTN and next(self.parameters()).is_cuda
+        all_pos       = []
+        seg_lens_flat = []
+        for seqs, seglens, pos in zip(batched_sequences, batched_seg_lens, batched_positions):
+            all_pos.append(pos)
+            seg_lens_flat.extend(seglens)
 
-        if use_varlen:
-            # Varlen flash-attn path: concatenate all real tokens across the batch into a
-            # single flat sequence. cu_seqlens encodes both per-image and per-batch-item
-            # boundaries so flash_attn_varlen_func enforces block-diagonal attention exactly.
-            all_seqs = []
-            all_pos  = []
-            seg_lens_flat = []  # one entry per image across all batch items
-            for seqs, seglens in zip(batched_sequences, batched_seg_lens):
-                # seqs is the concatenated real tokens for one batch item
-                all_seqs.append(seqs)
-                all_pos.append(batched_positions[len(all_seqs) - 1])
-                seg_lens_flat.extend(seglens)
+        flat_tokens    = torch.cat(batched_sequences, dim=0)
+        flat_positions = torch.cat(all_pos, dim=0)
 
-            flat_tokens    = torch.cat(all_seqs, dim=0)          # (total_tokens, dim)
-            flat_positions = torch.cat(all_pos,  dim=0)          # (total_tokens, 2)
+        seg_lens_t = torch.tensor(seg_lens_flat, dtype=torch.int32, device=device)
+        cu_seqlens = torch.zeros(len(seg_lens_flat) + 1, dtype=torch.int32, device=device)
+        cu_seqlens[1:] = seg_lens_t.cumsum(0)
+        max_seqlen = int(seg_lens_t.max().item())
 
-            seg_lens_t = torch.tensor(seg_lens_flat, dtype=torch.int32, device=device)
-            cu_seqlens = torch.zeros(len(seg_lens_flat) + 1, dtype=torch.int32, device=device)
-            cu_seqlens[1:] = seg_lens_t.cumsum(0)
-            max_seqlen = int(seg_lens_t.max().item())
+        h_idx = flat_positions[:, 0].unsqueeze(0)  # (1, total_tokens)
+        w_idx = flat_positions[:, 1].unsqueeze(0)
 
-            h_idx = flat_positions[:, 0].unsqueeze(0)  # (1, total_tokens)
-            w_idx = flat_positions[:, 1].unsqueeze(0)
+        x = self.dropout(flat_tokens.unsqueeze(0))  # (1, total_tokens, dim)
+        x = self.transformer(x, mask=None, attn_mask=None,
+                             positions=(h_idx, w_idx),
+                             cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        x = x.squeeze(0)  # (total_tokens, dim)
 
-            x = self.dropout(flat_tokens.unsqueeze(0))  # (1, total_tokens, dim)
-            x = self.transformer(x, mask=None, attn_mask=None,
-                                 positions=(h_idx, w_idx),
-                                 cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-            x = x.squeeze(0)  # (total_tokens, dim)
-
-            # Re-pad to (B, N_max, dim) and rebuild pad_mask for downstream use
-            pad_sequence = partial(orig_pad_sequence, batch_first=True)
-            split_sizes  = [s.shape[0] for s in batched_sequences]
-            x_split      = x.split(split_sizes, dim=0)
-            x            = pad_sequence(list(x_split))
-            max_len      = x.shape[1]
-            lengths      = torch.tensor(split_sizes, device=device)
-            pad_mask     = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
-        else:
-            patches         = pad_sequence(batched_sequences)   # (B, N_max, dim)
-            patch_positions = pad_sequence(batched_positions)   # (B, N_max, 2)
-
-            lengths = torch.tensor([s.shape[0] for s in batched_sequences], device=device)
-            max_len = patches.shape[1]
-
-            pad_mask  = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
-            attn_mask = _build_block_diagonal_mask(batched_seg_lens, max_len, device)
-
-            h_idx, w_idx = patch_positions.unbind(dim=-1)
-
-            x = self.dropout(patches)
-            x = self.transformer(x, mask=pad_mask, attn_mask=attn_mask, positions=(h_idx, w_idx))
+        split_sizes = [s.shape[0] for s in batched_sequences]
+        x_split     = x.split(split_sizes, dim=0)
+        x           = pad_sequence(list(x_split))
+        max_len     = x.shape[1]
+        lengths     = torch.tensor(split_sizes, device=device)
+        pad_mask    = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
 
         return x, pad_mask
