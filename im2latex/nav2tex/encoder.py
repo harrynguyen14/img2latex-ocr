@@ -100,10 +100,11 @@ class FeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0., use_flash_attn: bool = False):
         super().__init__()
         inner_dim    = dim_head * heads
         self.heads   = heads
+        self.use_flash_attn = use_flash_attn
         self.norm    = nn.LayerNorm(dim)
         self.q_norm  = RMSNorm(heads, dim_head)
         self.k_norm  = RMSNorm(heads, dim_head)
@@ -126,7 +127,7 @@ class Attention(nn.Module):
             h_idx, w_idx = positions
             q, k = apply_2d_rope(q, k, h_idx, w_idx)
 
-        if HAS_FLASH_ATTN and x.is_cuda and attn_mask is None:
+        if self.use_flash_attn and HAS_FLASH_ATTN and x.is_cuda and attn_mask is None:
             fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             q_ = rearrange(q, 'b h n d -> b n h d').contiguous().to(fa_dtype)
             k_ = rearrange(k, 'b h n d -> b n h d').contiguous().to(fa_dtype)
@@ -176,9 +177,9 @@ class Attention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.):
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0., use_flash_attn: bool = False):
         super().__init__()
-        self.attn = Attention(dim, heads, dim_head, dropout)
+        self.attn = Attention(dim, heads, dim_head, dropout, use_flash_attn=use_flash_attn)
         self.ffn  = FeedForward(dim, mlp_dim, dropout)
 
     def forward(self, x, mask=None, attn_mask=None, positions=None):
@@ -188,10 +189,10 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0., use_flash_attn: bool = False):
         super().__init__()
         self.layers = nn.ModuleList([
-            TransformerBlock(dim, heads, dim_head, mlp_dim, dropout)
+            TransformerBlock(dim, heads, dim_head, mlp_dim, dropout, use_flash_attn=use_flash_attn)
             for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(dim)
@@ -231,13 +232,16 @@ class NaViT_Encoder(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.,
         emb_dropout: float = 0.,
+        flash_attn: bool = False,
         image_size=None,
         patch_size=None,
     ):
         super().__init__()
         self.fge     = FineGrainedEmbedding(channels, dim)
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(
+            dim, depth, heads, dim_head, mlp_dim, dropout, use_flash_attn=flash_attn
+        )
 
     @property
     def device(self):

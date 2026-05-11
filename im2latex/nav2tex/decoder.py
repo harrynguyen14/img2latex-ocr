@@ -3,8 +3,8 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# Allow importing pretrain_decoder from the project root
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -60,37 +60,108 @@ class Nav2TexDecoder(nn.Module):
         Greedy or beam-search decode given encoder_output.
         Returns list of token-id lists (one per batch item).
         """
-        device = encoder_output.device
-        B      = encoder_output.size(0)
-        model  = self._model
+        beams = max(1, int(num_beams))
+        if beams == 1:
+            return self._greedy_decode_batched(encoder_output, max_new_tokens)
+        return self._beam_decode_batched(encoder_output, max_new_tokens, beams)
 
-        eos = self.eos_token_id
-        bos = self.bos_token_id
-
-        # Start every sequence with BOS
-        input_ids = torch.full((B, 1), bos, dtype=torch.long, device=device)
-        finished  = torch.zeros(B, dtype=torch.bool, device=device)
-        generated = [[] for _ in range(B)]
+    def _greedy_decode_batched(self, encoder_output: torch.Tensor, max_new_tokens: int) -> list[list[int]]:
+        bsz = encoder_output.size(0)
+        input_ids = torch.full(
+            (bsz, 1), self.bos_token_id, dtype=torch.long, device=encoder_output.device
+        )
+        finished = torch.zeros(bsz, dtype=torch.bool, device=encoder_output.device)
+        generated: list[list[int]] = [[] for _ in range(bsz)]
 
         for _ in range(max_new_tokens):
-            logits = model(
-                input_ids,
-                encoder_output=encoder_output,
-            )                                           # (B, T, V)
-            next_tok = logits[:, -1, :].argmax(dim=-1)  # (B,)
+            logits = self._model(input_ids, encoder_output=encoder_output)
+            next_tok = logits[:, -1, :].argmax(dim=-1)
+            for i in range(bsz):
+                if finished[i]:
+                    continue
+                tok = int(next_tok[i].item())
+                generated[i].append(tok)
+                if tok == self.eos_token_id:
+                    finished[i] = True
+            if finished.all():
+                break
+            input_ids = torch.cat([input_ids, next_tok.unsqueeze(1)], dim=1)
+        return generated
 
-            for i in range(B):
-                if not finished[i]:
-                    tok = next_tok[i].item()
-                    generated[i].append(tok)
-                    if tok == eos:
-                        finished[i] = True
+    def _beam_decode_batched(
+        self, encoder_output: torch.Tensor, max_new_tokens: int, num_beams: int
+    ) -> list[list[int]]:
+        bsz, src_len, src_dim = encoder_output.shape
+        device = encoder_output.device
+        vocab_size = self.vocab_size
+        eos = self.eos_token_id
+
+        seqs = torch.full((bsz, num_beams, 1), self.bos_token_id, dtype=torch.long, device=device)
+        scores = torch.full((bsz, num_beams), float("-inf"), device=device)
+        scores[:, 0] = 0.0
+        finished = torch.zeros((bsz, num_beams), dtype=torch.bool, device=device)
+
+        for _ in range(max_new_tokens):
+            flat_seqs = seqs.view(bsz * num_beams, -1)
+            flat_enc = (
+                encoder_output.unsqueeze(1)
+                .expand(bsz, num_beams, src_len, src_dim)
+                .reshape(bsz * num_beams, src_len, src_dim)
+            )
+            logits = self._model(flat_seqs, encoder_output=flat_enc)
+            log_probs = F.log_softmax(logits[:, -1, :], dim=-1).view(bsz, num_beams, vocab_size)
+
+            stay_finished = torch.full_like(log_probs, float("-inf"))
+            stay_finished[..., eos] = 0.0
+            log_probs = torch.where(finished.unsqueeze(-1), stay_finished, log_probs)
+
+            cand_scores = scores.unsqueeze(-1) + log_probs
+            cand_scores = cand_scores.view(bsz, num_beams * vocab_size)
+            top_scores, top_idx = torch.topk(cand_scores, k=num_beams, dim=-1)
+
+            beam_idx = top_idx // vocab_size
+            token_idx = top_idx % vocab_size
+
+            gather_idx = beam_idx.unsqueeze(-1).expand(-1, -1, seqs.size(-1))
+            selected_seqs = torch.gather(seqs, 1, gather_idx)
+            seqs = torch.cat([selected_seqs, token_idx.unsqueeze(-1)], dim=-1)
+
+            selected_finished = torch.gather(finished, 1, beam_idx)
+            finished = selected_finished | token_idx.eq(eos)
+            scores = top_scores
 
             if finished.all():
                 break
 
-            input_ids = torch.cat(
-                [input_ids, next_tok.unsqueeze(1)], dim=1
-            )
+        outputs: list[list[int]] = []
+        for b in range(bsz):
+            best_idx = 0
+            best_score = float("-inf")
+            for k in range(num_beams):
+                seq = seqs[b, k].tolist()
+                score = self._rerank_score(seq, float(scores[b, k].item()))
+                if score > best_score:
+                    best_score = score
+                    best_idx = k
+            outputs.append(seqs[b, best_idx, 1:].tolist())
+        return outputs
 
-        return generated
+    def _rerank_score(self, seq: list[int], logp_sum: float) -> float:
+        token_count = max(1, len(seq) - 1)
+        alpha = 0.7
+        length_norm = ((5.0 + token_count) / 6.0) ** alpha
+        rep_pen = self._repetition_penalty(seq[1:])
+        return (logp_sum / length_norm) - rep_pen
+
+    def _repetition_penalty(self, seq: list[int]) -> float:
+        if len(seq) < 4:
+            return 0.0
+        seen = set()
+        dup = 0
+        for i in range(len(seq) - 2):
+            tri = (seq[i], seq[i + 1], seq[i + 2])
+            if tri in seen:
+                dup += 1
+            else:
+                seen.add(tri)
+        return 0.1 * dup

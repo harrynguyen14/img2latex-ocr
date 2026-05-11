@@ -44,6 +44,7 @@ class LaTeXOCRModel(nn.Module):
                 dim_head=config["navit_dim_head"],
                 dropout=config["navit_dropout"],
                 emb_dropout=config["navit_emb_dropout"],
+                flash_attn=config.get("flash_attn", False),
             ),
             max_visual_tokens=config["max_visual_tokens"],
         )
@@ -70,9 +71,6 @@ class LaTeXOCRModel(nn.Module):
         labels:         torch.Tensor,
     ):
         ve, _ = self.visual_encoder(batched_images)
-
-        # encoder features → decoder cross-attention (K/V)
-        # input_ids/attention_mask → decoder self-attention (Q)
         loss, lm_loss, len_loss = self.decoder(
             input_ids,
             attention_mask=attention_mask,
