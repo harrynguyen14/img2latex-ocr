@@ -113,7 +113,7 @@ class Attention(nn.Module):
         self.to_out  = nn.Sequential(nn.Linear(inner_dim, dim, bias=False), nn.Dropout(dropout))
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, mask=None, attn_mask=None, positions=None):
+    def forward(self, x, mask=None, attn_mask=None, positions=None, cu_seqlens=None, max_seqlen=None):
         x = self.norm(x)
         q = self.to_q(x)
         k, v = self.to_kv(x).chunk(2, dim=-1)
@@ -127,44 +127,51 @@ class Attention(nn.Module):
             h_idx, w_idx = positions
             q, k = apply_2d_rope(q, k, h_idx, w_idx)
 
-        if self.use_flash_attn and HAS_FLASH_ATTN and x.is_cuda and attn_mask is None:
+        if self.use_flash_attn and HAS_FLASH_ATTN and x.is_cuda:
             fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             q_ = rearrange(q, 'b h n d -> b n h d').contiguous().to(fa_dtype)
             k_ = rearrange(k, 'b h n d -> b n h d').contiguous().to(fa_dtype)
             v_ = rearrange(v, 'b h n d -> b n h d').contiguous().to(fa_dtype)
-            if exists(mask):
+            dropout_p = self.dropout.p if self.training else 0.0
+
+            if exists(cu_seqlens) and exists(max_seqlen):
+                # Varlen path: cu_seqlens encodes block boundaries (NaViT packed images).
+                # q_/k_/v_ are already unpadded (B=1, total_tokens, H, D).
+                q_flat = q_.squeeze(0)
+                k_flat = k_.squeeze(0)
+                v_flat = v_.squeeze(0)
+                out_flat = flash_attn_varlen_func(
+                    q_flat, k_flat, v_flat,
+                    cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
+                    dropout_p=dropout_p,
+                    causal=False,
+                )
+                out = out_flat.unsqueeze(0)
+            elif exists(mask):
                 B, N = mask.shape
-                # Unpad once and reuse indices for k and v
                 q_unpad, indices, cu_seqlens_q, max_seqlen_q, *_ = unpad_input(q_, mask)
                 k_unpad = k_[mask]
                 v_unpad = v_[mask]
-                # Recompute cu_seqlens_k from mask (same mask → same lengths)
-                cu_seqlens_k = cu_seqlens_q
-                max_seqlen_k = max_seqlen_q
                 out_unpad = flash_attn_varlen_func(
                     q_unpad, k_unpad, v_unpad,
-                    cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-                    dropout_p=self.dropout.p if self.training else 0.0,
+                    cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_q,
+                    dropout_p=dropout_p,
                     causal=False,
                 )
                 out = pad_input(out_unpad, indices, B, N)
             else:
-                out = flash_attn_func(q_, k_, v_,
-                                      dropout_p=self.dropout.p if self.training else 0.0,
-                                      causal=False)
+                out = flash_attn_func(q_, k_, v_, dropout_p=dropout_p, causal=False)
             out = rearrange(out, 'b n h d -> b n (h d)').to(x.dtype)
         else:
-            # Use PyTorch SDPA for numerical stability and fused kernel when available
             dropout_p = self.dropout.p if self.training else 0.0
             combined_mask = None
             if exists(mask):
-                # (B, 1, 1, N) — broadcast over heads and query positions
                 combined_mask = mask[:, None, None, :]
             if exists(attn_mask):
                 combined_mask = attn_mask if combined_mask is None else (combined_mask & attn_mask)
             if combined_mask is not None:
-                # SDPA expects float additive mask or bool mask
                 combined_mask = combined_mask.expand(q.shape[0], self.heads, q.shape[2], k.shape[2])
             out = F.scaled_dot_product_attention(
                 q, k, v,
@@ -182,8 +189,9 @@ class TransformerBlock(nn.Module):
         self.attn = Attention(dim, heads, dim_head, dropout, use_flash_attn=use_flash_attn)
         self.ffn  = FeedForward(dim, mlp_dim, dropout)
 
-    def forward(self, x, mask=None, attn_mask=None, positions=None):
-        x = x + self.attn(x, mask=mask, attn_mask=attn_mask, positions=positions)
+    def forward(self, x, mask=None, attn_mask=None, positions=None, cu_seqlens=None, max_seqlen=None):
+        x = x + self.attn(x, mask=mask, attn_mask=attn_mask, positions=positions,
+                          cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         x = x + self.ffn(x)
         return x
 
@@ -197,9 +205,10 @@ class Transformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(dim)
 
-    def forward(self, x, mask=None, attn_mask=None, positions=None):
+    def forward(self, x, mask=None, attn_mask=None, positions=None, cu_seqlens=None, max_seqlen=None):
         for block in self.layers:
-            x = block(x, mask=mask, attn_mask=attn_mask, positions=positions)
+            x = block(x, mask=mask, attn_mask=attn_mask, positions=positions,
+                      cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         return self.norm(x)
 
 
@@ -281,20 +290,59 @@ class NaViT_Encoder(nn.Module):
             batched_positions.append(torch.cat(positions, dim=0))
             batched_seg_lens.append(seg_lens)
 
-        patches         = pad_sequence(batched_sequences)   # (B, N_max, dim)
-        patch_positions = pad_sequence(batched_positions)   # (B, N_max, 2)
+        use_varlen = HAS_FLASH_ATTN and next(self.parameters()).is_cuda
 
-        lengths = torch.tensor([s.shape[0] for s in batched_sequences], device=device)
-        max_len = patches.shape[1]
+        if use_varlen:
+            # Varlen flash-attn path: concatenate all real tokens across the batch into a
+            # single flat sequence. cu_seqlens encodes both per-image and per-batch-item
+            # boundaries so flash_attn_varlen_func enforces block-diagonal attention exactly.
+            all_seqs = []
+            all_pos  = []
+            seg_lens_flat = []  # one entry per image across all batch items
+            for seqs, seglens in zip(batched_sequences, batched_seg_lens):
+                # seqs is the concatenated real tokens for one batch item
+                all_seqs.append(seqs)
+                all_pos.append(batched_positions[len(all_seqs) - 1])
+                seg_lens_flat.extend(seglens)
 
-        # Padding mask: True = real token
-        pad_mask = torch.arange(max_len, device=device)[None, :] < lengths[:, None]  # (B, N_max)
+            flat_tokens    = torch.cat(all_seqs, dim=0)          # (total_tokens, dim)
+            flat_positions = torch.cat(all_pos,  dim=0)          # (total_tokens, 2)
 
-        # Block-diagonal mask: prevents cross-image attention within a packed sequence
-        attn_mask = _build_block_diagonal_mask(batched_seg_lens, max_len, device)  # (B,1,N,N)
+            seg_lens_t = torch.tensor(seg_lens_flat, dtype=torch.int32, device=device)
+            cu_seqlens = torch.zeros(len(seg_lens_flat) + 1, dtype=torch.int32, device=device)
+            cu_seqlens[1:] = seg_lens_t.cumsum(0)
+            max_seqlen = int(seg_lens_t.max().item())
 
-        h_idx, w_idx = patch_positions.unbind(dim=-1)
+            h_idx = flat_positions[:, 0].unsqueeze(0)  # (1, total_tokens)
+            w_idx = flat_positions[:, 1].unsqueeze(0)
 
-        x = self.dropout(patches)
-        x = self.transformer(x, mask=pad_mask, attn_mask=attn_mask, positions=(h_idx, w_idx))
+            x = self.dropout(flat_tokens.unsqueeze(0))  # (1, total_tokens, dim)
+            x = self.transformer(x, mask=None, attn_mask=None,
+                                 positions=(h_idx, w_idx),
+                                 cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x = x.squeeze(0)  # (total_tokens, dim)
+
+            # Re-pad to (B, N_max, dim) and rebuild pad_mask for downstream use
+            pad_sequence = partial(orig_pad_sequence, batch_first=True)
+            split_sizes  = [s.shape[0] for s in batched_sequences]
+            x_split      = x.split(split_sizes, dim=0)
+            x            = pad_sequence(list(x_split))
+            max_len      = x.shape[1]
+            lengths      = torch.tensor(split_sizes, device=device)
+            pad_mask     = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
+        else:
+            patches         = pad_sequence(batched_sequences)   # (B, N_max, dim)
+            patch_positions = pad_sequence(batched_positions)   # (B, N_max, 2)
+
+            lengths = torch.tensor([s.shape[0] for s in batched_sequences], device=device)
+            max_len = patches.shape[1]
+
+            pad_mask  = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
+            attn_mask = _build_block_diagonal_mask(batched_seg_lens, max_len, device)
+
+            h_idx, w_idx = patch_positions.unbind(dim=-1)
+
+            x = self.dropout(patches)
+            x = self.transformer(x, mask=pad_mask, attn_mask=attn_mask, positions=(h_idx, w_idx))
+
         return x, pad_mask
