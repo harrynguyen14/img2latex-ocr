@@ -25,8 +25,8 @@ class Nav2TexDecoder(nn.Module):
     def get_input_embeddings(self) -> nn.Embedding:
         return self._model.token_embed
 
-    def forward(self, input_ids, attention_mask=None, encoder_output=None, labels=None):
-        return self._model(input_ids, attention_mask=attention_mask, encoder_output=encoder_output, labels=labels)
+    def forward(self, input_ids, attention_mask=None, encoder_output=None, labels=None, true_len=None):
+        return self._model(input_ids, attention_mask=attention_mask, encoder_output=encoder_output, labels=labels, true_len=true_len)
 
     @torch.no_grad()
     def generate(self, encoder_output, max_new_tokens=256, num_beams=1):
