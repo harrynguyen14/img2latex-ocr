@@ -370,10 +370,11 @@ class Trainer:
         self.model.unfreeze_all()
         self.optimizer = _make_optimizer(self.model, self.args.lr, self.args.weight_decay)
         remaining = self.total_steps - self.global_step
-        self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=0, max_steps=remaining)
+        decoder_rewarm = min(500, remaining // 20)
+        self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=decoder_rewarm, max_steps=remaining)
         # Rebuild cached param list after unfreeze
         self._refresh_trainable_params()
-        tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset")
+        tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset, rewarmup={decoder_rewarm}")
 
     def train(self):
         args       = self.args
