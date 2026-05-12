@@ -2,7 +2,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from .preprocessor import Nav2TexTrainDataset, Nav2TexValDataset
-from .utils import TokenBudgetBatcher, collate_fn
+from .utils import collate_fn
 
 _DEFAULT_SOURCES = ["raw", "light", "heavy"]
 _DEFAULT_WEIGHTS = [1.0, 1.0, 1.0]
@@ -29,15 +29,17 @@ def build_datasets(args, tokenizer):
 
 
 def build_dataloader(ds, token_budget: int, nw: int, pin: bool, prefetch: int, persistent: bool):
-    batched_ds = TokenBudgetBatcher(ds, token_budget)
+    median_tokens_per_image = 128  # after FGE stride=patch_size resize
+    batch_size = max(1, token_budget // median_tokens_per_image)
     kw = {
-        "batch_size":  1,           # each item from batcher is already a full batch (list)
+        "batch_size":  batch_size,
         "num_workers": nw,
-        "collate_fn":  lambda x: collate_fn(x[0]),  # unwrap the outer list added by DataLoader
+        "collate_fn":  collate_fn,
         "pin_memory":  pin,
         "shuffle":     False,
+        "drop_last":   True,
     }
     if nw > 0:
         kw["prefetch_factor"]    = prefetch
         kw["persistent_workers"] = persistent
-    return DataLoader(batched_ds, **kw)
+    return DataLoader(ds, **kw)

@@ -155,9 +155,8 @@ def _process(sample: dict, tokenizer, args) -> dict:
     aug_mode = getattr(args, "aug_mode", "none")
     if aug_mode != "none":
         pil = apply_augmentation(pil, aug_mode)
-    # FGE applies 2× conv stride-2, so effective token stride = patch_size × 4
     patch_size = getattr(args, "patch_size", 4)
-    effective_stride = patch_size * 4
+    effective_stride = patch_size  # FGE = 2× stride-2 conv → total stride = patch_size
     pil = _resize_to_token_budget(
         pil,
         max_tokens=getattr(args, "max_visual_tokens", 1024),
