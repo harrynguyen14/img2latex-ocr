@@ -109,7 +109,7 @@ class FineGrainedEmbedding(nn.Module):
         super().__init__()
         mid = dim // 2
         self.conv1 = nn.Conv2d(channels, mid, kernel_size=3, stride=2, padding=1, bias=False)
-        self.norm1 = nn.GroupNorm(1, mid)
+        self.norm1 = nn.BatchNorm2d(mid)
         self.conv2 = nn.Conv2d(mid, dim, kernel_size=3, stride=2, padding=1, bias=False)
         self.norm2 = nn.LayerNorm(dim)
 
