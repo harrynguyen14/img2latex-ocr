@@ -154,15 +154,17 @@ def _process(sample: dict, tokenizer, args) -> dict:
     aug_mode = getattr(args, "aug_mode", "none")
     if aug_mode != "none":
         pil = apply_augmentation(pil, aug_mode)
+    # FGE applies 2× conv stride-2, so effective token stride = patch_size × 4
+    patch_size = getattr(args, "patch_size", 4)
+    effective_stride = patch_size * 4
     pil = _resize_to_token_budget(
         pil,
         max_tokens=getattr(args, "max_visual_tokens", 1024),
-        patch_stride=getattr(args, "patch_size", 4),
+        patch_stride=effective_stride,
         max_side=getattr(args, "max_side", 2048),
     )
-    patch_stride = getattr(args, "patch_size", 4)
     w, h = pil.size
-    num_tokens = (h // patch_stride) * (w // patch_stride)
+    num_tokens = (h // effective_stride) * (w // effective_stride)
 
     tensor = _to_tensor(pil)
     label = sample.get("latex") or sample.get("label") or ""

@@ -52,4 +52,5 @@ def configure_runtime(cfg, device: torch.device):
     if device.type == "cuda" and cuda_benchmark:
         torch.backends.cudnn.benchmark = True
     if device.type == "cuda":
-        torch.backends.cuda.enable_flash_sdp(bool(flash_attn))
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
