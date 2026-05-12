@@ -47,8 +47,9 @@ def _resize_to_token_budget(
 
 
 def _to_tensor(img: Image.Image) -> torch.Tensor:
-    t = TF.to_tensor(img)
-    return TF.normalize(t, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    arr = np.asarray(img, dtype=np.float32)  # H W C, no copy if already uint8
+    t = torch.from_numpy(arr).permute(2, 0, 1).mul_(1.0 / 127.5).sub_(1.0)
+    return t
 
 
 def _aug_jpeg(img: Image.Image, quality_range=(40, 85)) -> Image.Image:
