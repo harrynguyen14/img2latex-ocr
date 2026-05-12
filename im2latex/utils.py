@@ -1,11 +1,10 @@
 import os
 import torch
 from typing import Any
+from torch.utils.data import IterableDataset
 
 
-class TokenBudgetBatcher:
-    """Wraps an iterable dataset and yields batches where total visual tokens <= budget."""
-
+class TokenBudgetBatcher(IterableDataset):
     def __init__(self, dataset, token_budget: int):
         self.dataset      = dataset
         self.token_budget = token_budget
