@@ -281,7 +281,7 @@ class Trainer:
             print(f"[resume] No model.safetensors in {resume_dir}")
             return
 
-        _load_model_state(self.model, st_load_file(str(sf)), strict=True)
+        _load_model_state(self.model, st_load_file(str(sf)), strict=False)
 
         trainer_sf = resume_dir / "trainer.safetensors"
         if trainer_sf.exists():
