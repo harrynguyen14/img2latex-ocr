@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from einops import rearrange
-from typing import List
+from typing import List, Optional
 from functools import partial
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts, CheckpointPolicy
@@ -20,6 +20,15 @@ def _load_flash_attn():
         return True
     except ImportError:
         return False
+
+
+def _build_block_diagonal_mask(cu_seqlens: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    total = int(cu_seqlens[-1].item())
+    mask = torch.full((total, total), float('-inf'), device=cu_seqlens.device, dtype=dtype)
+    for i in range(len(cu_seqlens) - 1):
+        s, e = int(cu_seqlens[i].item()), int(cu_seqlens[i + 1].item())
+        mask[s:e, s:e] = 0.0
+    return mask  # [N, N]
 
 
 class RMSNorm(nn.Module):
@@ -109,7 +118,7 @@ class Attention(nn.Module):
         self.to_out = nn.Sequential(nn.Linear(inner_dim, dim, bias=False), nn.Dropout(dropout))
         self.dropout_p = dropout
 
-    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None):
+    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None, attn_bias=None):
         x = self.norm(x)
         q = self.to_q(x)
         k, v = self.to_kv(x).chunk(2, dim=-1)
@@ -137,7 +146,7 @@ class Attention(nn.Module):
             )
             out = rearrange(out, 'n h d -> () n (h d)').to(x.dtype)
         else:
-            out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout_p=dropout_p)
             out = rearrange(out, 'b h n d -> b n (h d)')
 
         return self.to_out(out)
@@ -149,8 +158,8 @@ class TransformerBlock(nn.Module):
         self.attn = Attention(dim, heads, dim_head, dropout)
         self.ffn  = FeedForward(dim, mlp_dim, dropout)
 
-    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None):
-        x = x + self.attn(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None, attn_bias=None):
+        x = x + self.attn(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_bias=attn_bias)
         x = x + self.ffn(x)
         return x
 
@@ -165,11 +174,11 @@ class Transformer(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.grad_checkpoint = grad_checkpoint
 
-    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None):
+    def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None, attn_bias=None):
         for block in self.layers:
             if self.grad_checkpoint and self.training:
                 x = checkpoint(
-                    block, x, positions, cu_seqlens, max_seqlen,
+                    block, x, positions, cu_seqlens, max_seqlen, attn_bias,
                     use_reentrant=False,
                     context_fn=partial(
                         create_selective_checkpoint_contexts,
@@ -177,7 +186,7 @@ class Transformer(nn.Module):
                     ),
                 )
             else:
-                x = block(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x = block(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_bias=attn_bias)
         return self.norm(x)
 
     @staticmethod
@@ -251,8 +260,13 @@ class NaViT_Encoder(nn.Module):
         h_idx = flat_positions[:, 0].unsqueeze(0)
         w_idx = flat_positions[:, 1].unsqueeze(0)
 
+        # FA2 handles masking via cu_seqlens; SDPA needs explicit block-diagonal mask
+        attn_bias = None
+        if not _load_flash_attn():
+            attn_bias = _build_block_diagonal_mask(cu_seqlens, dtype=flat_tokens.dtype)
+
         x = self.dropout(flat_tokens.unsqueeze(0))
-        x = self.transformer(x, positions=(h_idx, w_idx), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        x = self.transformer(x, positions=(h_idx, w_idx), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_bias=attn_bias)
         x = x.squeeze(0)
 
         split_sizes = [s.shape[0] for s in batched_sequences]
