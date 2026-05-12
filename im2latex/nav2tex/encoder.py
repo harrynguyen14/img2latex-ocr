@@ -17,21 +17,42 @@ def _load_flash_attn():
         return True
     try:
         import flash_attn as _fa
-        _ver = tuple(int(x) for x in getattr(_fa, "__version__", "2.0.0").split(".")[:2])
-        if _ver >= (3, 0):
-            from flash_attn import flash_attn_varlen_func as _fn
+
+        _fn = None
+        # FA4: functions live in flash_attn.cute, not at top level
+        try:
+            from flash_attn.cute import flash_attn_varlen_func as _fn
+        except ImportError:
+            pass
+        # FA2/FA3: functions at top level
+        if _fn is None:
             try:
-                from flash_attn.bert_padding import unpad_input as _u, pad_input as _p
+                from flash_attn import flash_attn_varlen_func as _fn
             except ImportError:
-                from flash_attn.utils.padding import unpad_input as _u, pad_input as _p
-        else:
-            from flash_attn import flash_attn_varlen_func as _fn
-            from flash_attn.bert_padding import unpad_input as _u, pad_input as _p
+                pass
+        if _fn is None:
+            raise ImportError("flash_attn_varlen_func not found in flash_attn.cute or flash_attn")
+
+        # Padding helpers — FA4 may not have these (uses cu_seqlens directly)
+        _u = _p = None
+        for _mod in ("flash_attn.bert_padding", "flash_attn.utils.padding"):
+            try:
+                import importlib
+                _m = importlib.import_module(_mod)
+                _u = getattr(_m, "unpad_input", None)
+                _p = getattr(_m, "pad_input", None)
+                if _u and _p:
+                    break
+            except ImportError:
+                pass
+
         _flash_attn_varlen_func = _fn
         _unpad_input = _u
         _pad_input = _p
         return True
-    except Exception:
+    except Exception as _e:
+        import traceback as _tb
+        _tb.print_exc()
         return False
 
 
