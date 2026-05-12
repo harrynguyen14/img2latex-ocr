@@ -1,12 +1,17 @@
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from .utils import configure_runtime
-from .build_datasets import build_datasets, build_dataloader
-from .trainer import Trainer
+
+def _ensure_package_importable():
+    """Add parent of im2latex/ to sys.path so relative imports work when run directly."""
+    pkg_dir = Path(__file__).resolve().parent
+    root = str(pkg_dir.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
 
 
 def parse_args():
@@ -43,8 +48,7 @@ def parse_args():
     ap.add_argument("--navit_emb_dropout",   type=float, default=0.0)
 
     ap.add_argument("--decoder_warmup_steps", type=int,   default=5000)
-    ap.add_argument("--token_budget",         type=int,   default=4096,
-                    help="Max total visual tokens per batch (token-budget batching)")
+    ap.add_argument("--batch_size",           type=int,   default=16)
     ap.add_argument("--grad_accum",           type=int,   default=32)
     ap.add_argument("--lr",                   type=float, default=1e-4)
     ap.add_argument("--weight_decay",         type=float, default=0.01)
@@ -61,7 +65,8 @@ def parse_args():
     ap.add_argument("--num_workers",          type=int,   default=1)
     ap.add_argument("--prefetch_factor",      type=int,   default=4)
     ap.add_argument("--persistent_workers",   action="store_true", default=False)
-    ap.add_argument("--cuda_benchmark",       action="store_true", default=True)
+    ap.add_argument("--no_cuda_benchmark",    action="store_true", default=False,
+                    help="Disable cudnn.benchmark (enabled by default)")
     ap.add_argument("--grad_checkpoint",      action="store_true", default=False)
     ap.add_argument("--torch_compile",        action="store_true", default=False)
     ap.add_argument("--seed",                 type=int,   default=42)
@@ -74,7 +79,9 @@ def parse_args():
     ap.add_argument("--early_stopping_patience", type=int, default=0,
                     help="Stop if val_ppl does not improve for this many val checks. 0 = disabled.")
 
-    return ap.parse_args()
+    args = ap.parse_args()
+    args.cuda_benchmark = not args.no_cuda_benchmark
+    return args
 
 
 def main():
@@ -88,6 +95,10 @@ def main():
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
 
+    from im2latex.utils import configure_runtime
+    from im2latex.build_datasets import build_datasets, build_dataloader
+    from im2latex.trainer import Trainer
+
     configure_runtime(args, device)
 
     from transformers import AutoTokenizer
@@ -98,12 +109,13 @@ def main():
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
     persistent = args.persistent_workers and nw > 0
-    train_loader = build_dataloader(train_ds, args.token_budget, nw, device.type == "cuda", prefetch, persistent, args.max_visual_tokens)
-    val_loader   = build_dataloader(val_ds,   args.token_budget, nw, device.type == "cuda", prefetch, persistent, args.max_visual_tokens)
+    train_loader = build_dataloader(train_ds, args.batch_size, nw, device.type == "cuda", prefetch, persistent)
+    val_loader   = build_dataloader(val_ds,   args.batch_size, nw, device.type == "cuda", prefetch, persistent)
 
     trainer = Trainer(args, train_loader, val_loader, device, tokenizer)
     trainer.train()
 
 
 if __name__ == "__main__":
+    _ensure_package_importable()
     main()

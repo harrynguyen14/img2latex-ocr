@@ -312,12 +312,11 @@ class Trainer:
         persistent = args.persistent_workers and nw > 0
         self.train_loader = build_dataloader(
             self.train_loader.dataset,
-            args.token_budget,
+            args.batch_size,
             nw,
             self.device.type == "cuda",
             prefetch,
             persistent,
-            args.max_visual_tokens,
         )
 
     def _maybe_switch_weight_stage(self, force: bool = False) -> bool:
