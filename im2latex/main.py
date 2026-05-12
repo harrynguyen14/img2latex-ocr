@@ -62,7 +62,7 @@ def parse_args():
     ap.add_argument("--prefetch_factor",      type=int,   default=4)
     ap.add_argument("--persistent_workers",   action="store_true", default=False)
     ap.add_argument("--cuda_benchmark",       action="store_true", default=True)
-    ap.add_argument("--flash-attn",           dest="flash_attn", action="store_true", default=False)
+    ap.add_argument("--grad_checkpoint",      action="store_true", default=False)
     ap.add_argument("--torch_compile",        action="store_true", default=False)
     ap.add_argument("--seed",                 type=int,   default=42)
 

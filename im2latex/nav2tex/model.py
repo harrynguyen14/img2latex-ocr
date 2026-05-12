@@ -44,7 +44,7 @@ class LaTeXOCRModel(nn.Module):
                 dim_head=config["navit_dim_head"],
                 dropout=config["navit_dropout"],
                 emb_dropout=config["navit_emb_dropout"],
-                flash_attn=config.get("flash_attn", False),
+                grad_checkpoint=config.get("grad_checkpoint", False),
             ),
             max_visual_tokens=config["max_visual_tokens"],
         )

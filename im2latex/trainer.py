@@ -16,11 +16,7 @@ except ImportError:
     HAS_BNB = False
 from tqdm import tqdm
 
-try:
-    from safetensors.torch import save_file as st_save_file, load_file as st_load_file
-    HAS_SAFETENSORS = True
-except ImportError:
-    HAS_SAFETENSORS = False
+from safetensors.torch import save_file as st_save_file, load_file as st_load_file
 
 from .build_datasets import build_dataloader
 from .utils import move_batch
@@ -240,6 +236,7 @@ class Trainer:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32       = True
             torch.backends.cudnn.benchmark        = True
+            self.model.visual_encoder.to(memory_format=torch.channels_last)
 
         if getattr(args, "torch_compile", False):
             print("Compiling visual_encoder with torch.compile ...")

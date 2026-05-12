@@ -48,7 +48,6 @@ def move_batch(batch, device):
 def configure_runtime(cfg, device: torch.device):
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     cuda_benchmark = cfg.get("cuda_benchmark", True) if isinstance(cfg, dict) else getattr(cfg, "cuda_benchmark", True)
-    flash_attn     = cfg.get("flash_attn",     False) if isinstance(cfg, dict) else getattr(cfg, "flash_attn",     False)
     if device.type == "cuda" and cuda_benchmark:
         torch.backends.cudnn.benchmark = True
     if device.type == "cuda":

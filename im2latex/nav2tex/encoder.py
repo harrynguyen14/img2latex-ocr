@@ -5,59 +5,21 @@ from einops import rearrange
 from typing import List
 from functools import partial
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
+from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts, CheckpointPolicy
 
 _flash_attn_varlen_func = None
-_unpad_input = None
-_pad_input = None
 
 
 def _load_flash_attn():
-    global _flash_attn_varlen_func, _unpad_input, _pad_input
+    global _flash_attn_varlen_func
     if _flash_attn_varlen_func is not None:
         return True
     try:
-        import flash_attn as _fa
-
-        _fn = None
-        # FA4: functions live in flash_attn.cute, not at top level
-        try:
-            from flash_attn.cute import flash_attn_varlen_func as _fn
-        except ImportError:
-            pass
-        # FA2/FA3: functions at top level
-        if _fn is None:
-            try:
-                from flash_attn import flash_attn_varlen_func as _fn
-            except ImportError:
-                pass
-        if _fn is None:
-            raise ImportError("flash_attn_varlen_func not found in flash_attn.cute or flash_attn")
-
-        # Padding helpers — FA4 may not have these (uses cu_seqlens directly)
-        _u = _p = None
-        for _mod in ("flash_attn.bert_padding", "flash_attn.utils.padding"):
-            try:
-                import importlib
-                _m = importlib.import_module(_mod)
-                _u = getattr(_m, "unpad_input", None)
-                _p = getattr(_m, "pad_input", None)
-                if _u and _p:
-                    break
-            except ImportError:
-                pass
-
+        from flash_attn import flash_attn_varlen_func as _fn
         _flash_attn_varlen_func = _fn
-        _unpad_input = _u
-        _pad_input = _p
         return True
-    except Exception as _e:
-        import traceback as _tb
-        _tb.print_exc()
+    except ImportError:
         return False
-
-
-def exists(val):
-    return val is not None
 
 
 class RMSNorm(nn.Module):
@@ -161,7 +123,7 @@ class Attention(nn.Module):
 
         dropout_p = self.dropout_p if self.training else 0.0
 
-        if cu_seqlens is not None and not self.training and _load_flash_attn():
+        if cu_seqlens is not None and _load_flash_attn():
             fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             q_ = rearrange(q, 'b h n d -> (b n) h d').contiguous().to(fa_dtype)
             k_ = rearrange(k, 'b h n d -> (b n) h d').contiguous().to(fa_dtype)
@@ -194,18 +156,41 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0., grad_checkpoint=False):
         super().__init__()
         self.layers = nn.ModuleList([
             TransformerBlock(dim, heads, dim_head, mlp_dim, dropout)
             for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(dim)
+        self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x, positions=None, cu_seqlens=None, max_seqlen=None):
         for block in self.layers:
-            x = block(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if self.grad_checkpoint and self.training:
+                x = checkpoint(
+                    block, x, positions, cu_seqlens, max_seqlen,
+                    use_reentrant=False,
+                    context_fn=partial(
+                        create_selective_checkpoint_contexts,
+                        self._sac_policy,
+                    ),
+                )
+            else:
+                x = block(x, positions=positions, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         return self.norm(x)
+
+    @staticmethod
+    def _sac_policy(ctx, op, *args, **kwargs):
+        _SAVE = {
+            torch.ops.aten.mm.default,
+            torch.ops.aten.bmm.default,
+            torch.ops.aten.addmm.default,
+            torch.ops.aten._scaled_dot_product_flash_attention.default,
+            torch.ops.aten._scaled_dot_product_efficient_attention.default,
+            torch.ops.aten._flash_attention_forward.default,
+        }
+        return CheckpointPolicy.MUST_SAVE if op in _SAVE else CheckpointPolicy.PREFER_RECOMPUTE
 
 
 class NaViT_Encoder(nn.Module):
@@ -220,14 +205,12 @@ class NaViT_Encoder(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.,
         emb_dropout: float = 0.,
-        flash_attn: bool = False,
-        image_size=None,
-        patch_size=None,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.fge         = FineGrainedEmbedding(channels, dim)
         self.dropout     = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout, grad_checkpoint=grad_checkpoint)
 
     @property
     def device(self):
