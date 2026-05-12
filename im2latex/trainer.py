@@ -259,6 +259,15 @@ class Trainer:
 
         self._maybe_switch_weight_stage(force=True)
 
+        # FIX: cache trainable param list once — avoid list comprehension every step
+        self._trainable_params: list[nn.Parameter] = [
+            p for p in self.model.parameters() if p.requires_grad
+        ]
+
+    def _refresh_trainable_params(self):
+        """Call after freeze/unfreeze to rebuild cached param list."""
+        self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+
     def _load_resume(self, resume_dir: Path):
         sf = resume_dir / "model.safetensors"
         if not sf.exists():
@@ -354,17 +363,18 @@ class Trainer:
         self.optimizer = _make_optimizer(self.model, self.args.lr, self.args.weight_decay)
         remaining = self.total_steps - self.global_step
         self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=0, max_steps=remaining)
+        # Rebuild cached param list after unfreeze
+        self._refresh_trainable_params()
         tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset")
 
     def train(self):
         args       = self.args
         accum      = args.grad_accum
         micro      = 0
-        accum_loss = 0.0
         data_iter  = iter(self.train_loader)
 
-        val_loss_steps = getattr(args, "val_loss_steps", 2500)
-        eval_steps     = getattr(args, "eval_steps", 10000)
+        val_loss_steps  = getattr(args, "val_loss_steps", 2500)
+        eval_steps      = getattr(args, "eval_steps", 10000)
         max_val_batches = max(args.eval_samples, 1)
         bleu_batches    = max(getattr(args, "bleu_samples", 1500), 1)
 
@@ -375,8 +385,12 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
-        accum_lm_loss  = 0.0
-        accum_len_loss = 0.0
+        # FIX: accumulate loss on GPU as a tensor — defer .item() (CPU sync)
+        # to only once per optimizer step (at log time), not every micro-step.
+        device = self.device
+        accum_loss     = torch.zeros(1, device=device)
+        accum_lm_loss  = torch.zeros(1, device=device)
+        accum_len_loss = torch.zeros(1, device=device)
 
         while self.global_step < self.total_steps:
             try:
@@ -385,21 +399,27 @@ class Trainer:
                 data_iter = iter(self.train_loader)
                 batch = next(data_iter)
 
-            batch = move_batch(batch, self.device)
+            batch = move_batch(batch, device)
             loss, lm_loss, len_loss = self._forward_loss(batch)
-            (loss / accum).backward()
-            accum_loss     += loss.item()     / accum
-            accum_lm_loss  += lm_loss.item()  / accum
-            accum_len_loss += len_loss.item() / accum
-            micro += 1
 
+            scaled = loss / accum
+            scaled.backward()
+
+            # Accumulate on GPU — no CPU sync here
+            with torch.no_grad():
+                accum_loss     += loss     / accum
+                accum_lm_loss  += lm_loss  / accum
+                accum_len_loss += len_loss / accum
+
+            micro += 1
             if micro < accum:
                 continue
 
+            # FIX: use cached _trainable_params — no list comprehension per step
             grad_norm = nn.utils.clip_grad_norm_(
-                [p for p in self.model.parameters() if p.requires_grad],
+                self._trainable_params,
                 args.max_grad_norm,
-            ).item()
+            ).item()  # one sync here is unavoidable (need scalar for logging)
 
             self.optimizer.step()
             self.scheduler.step()
@@ -415,19 +435,25 @@ class Trainer:
                 self._unfreeze_decoder()
 
             if self.global_step % args.log_steps == 0:
-                lr_now = self.scheduler.get_last_lr()[0]
+                # Single .item() call per log interval — pull all three at once
+                loss_val     = accum_loss.item()
+                lm_loss_val  = accum_lm_loss.item()
+                len_loss_val = accum_len_loss.item()
+                lr_now       = self.scheduler.get_last_lr()[0]
                 tqdm.write(str({
-                    "ppl":       round(math.exp(min(accum_loss, 20.0)), 2),
-                    "loss":      round(accum_loss,     4),
-                    "lm":        round(accum_lm_loss,  4),
-                    "len":       round(accum_len_loss, 4),
-                    "grad_norm": round(grad_norm,      4),
+                    "ppl":       round(math.exp(min(loss_val, 20.0)), 2),
+                    "loss":      round(loss_val,     4),
+                    "lm":        round(lm_loss_val,  4),
+                    "len":       round(len_loss_val, 4),
+                    "grad_norm": round(grad_norm,    4),
                     "lr":        f"{lr_now:.2e}",
                     "step":      self.global_step,
                 }))
-            accum_loss     = 0.0
-            accum_lm_loss  = 0.0
-            accum_len_loss = 0.0
+
+            # Reset GPU accumulators
+            accum_loss.zero_()
+            accum_lm_loss.zero_()
+            accum_len_loss.zero_()
 
             if self.global_step % val_loss_steps == 0:
                 val_metrics = run_val_loss(self.model, self.val_loader, self.device, max_val_batches)

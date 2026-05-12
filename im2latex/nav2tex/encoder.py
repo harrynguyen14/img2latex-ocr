@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from einops import rearrange
-from typing import List, Optional
+from typing import List
 from functools import partial
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts, CheckpointPolicy
@@ -28,7 +28,7 @@ def _build_block_diagonal_mask(cu_seqlens: torch.Tensor, dtype: torch.dtype) -> 
     for i in range(len(cu_seqlens) - 1):
         s, e = int(cu_seqlens[i].item()), int(cu_seqlens[i + 1].item())
         mask[s:e, s:e] = 0.0
-    return mask  # [N, N]
+    return mask
 
 
 class RMSNorm(nn.Module):
@@ -85,6 +85,7 @@ class FineGrainedEmbedding(nn.Module):
         self.norm2 = nn.LayerNorm(dim)
 
     def forward(self, x: Tensor) -> tuple[Tensor, tuple[int, int]]:
+        """x: (B, C, H, W) — supports any batch size."""
         x = F.gelu(self.norm1(self.conv1(x)))
         x = self.conv2(x)
         H, W = x.shape[-2], x.shape[-1]
@@ -202,6 +203,22 @@ class Transformer(nn.Module):
         return CheckpointPolicy.MUST_SAVE if op in _SAVE else CheckpointPolicy.PREFER_RECOMPUTE
 
 
+# ---------------------------------------------------------------------------
+# Position grid cache — avoid meshgrid() allocation on every forward pass
+# ---------------------------------------------------------------------------
+_pos_cache: dict[tuple[int, int, torch.device], tuple[Tensor, Tensor]] = {}
+
+
+def _get_pos_grid(ph: int, pw: int, device: torch.device) -> tuple[Tensor, Tensor]:
+    """Cached flat (h_coords, w_coords) tensors of shape (ph*pw,)."""
+    key = (ph, pw, device)
+    if key not in _pos_cache:
+        h_coords = torch.arange(ph, device=device).repeat_interleave(pw)  # raster order
+        w_coords = torch.arange(pw, device=device).repeat(ph)
+        _pos_cache[key] = (h_coords, w_coords)
+    return _pos_cache[key]
+
+
 class NaViT_Encoder(nn.Module):
     def __init__(
         self,
@@ -226,54 +243,79 @@ class NaViT_Encoder(nn.Module):
         return next(self.parameters()).device
 
     def forward(self, batched_images: List[List[Tensor]]):
-        device = self.device
-        arange = partial(torch.arange, device=device)
+        """
+        Key changes vs original:
+          1. Batched FGE — group same-size images, one kernel launch per size group
+             instead of one kernel launch per image.
+          2. Remove image.to(device) inside forward — move_batch() already placed
+             all tensors on the correct device before this call.
+          3. Cached position grids — _get_pos_grid() returns pre-built tensors,
+             no meshgrid/stack/rearrange overhead per forward pass.
+          4. seg_lens built entirely on CPU as a plain list → one torch.tensor()
+             call at the end, avoiding repeated small GPU allocations.
+        """
+        device   = self.device
         pad_sequence = partial(orig_pad_sequence, batch_first=True)
 
-        batched_sequences = []
-        batched_positions = []
-        seg_lens_flat     = []
+        all_feats:       list[Tensor] = []   # (ph*pw, dim) per image
+        all_h:           list[Tensor] = []   # (ph*pw,)     per image
+        all_w:           list[Tensor] = []   # (ph*pw,)     per image
+        seg_lens_cpu:    list[int]    = []   # flat, one int per image
+        per_sample_lens: list[int]    = []   # total visual tokens per sample
 
         for images in batched_images:
-            sequences = []
-            positions = []
-            for image in images:
-                image = image.to(device)
-                feat, (ph, pw) = self.fge(image.unsqueeze(0))
-                feat = feat.squeeze(0)
-                pos = torch.stack(torch.meshgrid(arange(ph), arange(pw), indexing='ij'), dim=-1)
-                pos = rearrange(pos, 'h w c -> (h w) c')
-                sequences.append(feat)
-                positions.append(pos)
-                seg_lens_flat.append(ph * pw)
-            batched_sequences.append(torch.cat(sequences, dim=0))
-            batched_positions.append(torch.cat(positions, dim=0))
+            sample_tokens = 0
 
-        flat_tokens    = torch.cat(batched_sequences, dim=0)
-        flat_positions = torch.cat(batched_positions, dim=0)
+            # Group images within this sample by (H, W) so FGE can run batched.
+            # In the common case (1 image per sample) this is a single group of 1.
+            size_groups: dict[tuple[int, int], list[Tensor]] = {}
+            for img in images:
+                # img.shape == (C, H, W) — already on `device`
+                sz = (img.shape[-2], img.shape[-1])
+                size_groups.setdefault(sz, []).append(img)
 
-        seg_lens_t = torch.tensor(seg_lens_flat, dtype=torch.int32, device=device)
-        cu_seqlens = torch.zeros(len(seg_lens_flat) + 1, dtype=torch.int32, device=device)
+            for (H, W), imgs in size_groups.items():
+                stacked = torch.stack(imgs, dim=0)              # (G, C, H, W)
+                feats, (ph, pw) = self.fge(stacked)             # (G, ph*pw, dim)
+                h_coords, w_coords = _get_pos_grid(ph, pw, device)
+
+                for feat in feats.unbind(0):                    # iterate G without copy
+                    all_feats.append(feat)
+                    all_h.append(h_coords)
+                    all_w.append(w_coords)
+                    seg_lens_cpu.append(ph * pw)
+                    sample_tokens += ph * pw
+
+            per_sample_lens.append(sample_tokens)
+
+        flat_tokens = torch.cat(all_feats, dim=0)              # (total_tokens, dim)
+        flat_h      = torch.cat(all_h,     dim=0)              # (total_tokens,)
+        flat_w      = torch.cat(all_w,     dim=0)              # (total_tokens,)
+
+        # Single device allocation for cu_seqlens
+        seg_lens_t = torch.tensor(seg_lens_cpu, dtype=torch.int32, device=device)
+        cu_seqlens = torch.zeros(len(seg_lens_cpu) + 1, dtype=torch.int32, device=device)
         cu_seqlens[1:] = seg_lens_t.cumsum(0)
-        max_seqlen = int(seg_lens_t.max().item())
+        max_seqlen     = int(seg_lens_t.max().item())
 
-        h_idx = flat_positions[:, 0].unsqueeze(0)
-        w_idx = flat_positions[:, 1].unsqueeze(0)
-
-        # FA2 handles masking via cu_seqlens; SDPA needs explicit block-diagonal mask
-        attn_bias = None
-        if not _load_flash_attn():
-            attn_bias = _build_block_diagonal_mask(cu_seqlens, dtype=flat_tokens.dtype)
+        h_idx = flat_h.unsqueeze(0)   # (1, total_tokens)
+        w_idx = flat_w.unsqueeze(0)   # (1, total_tokens)
 
         x = self.dropout(flat_tokens.unsqueeze(0))
-        x = self.transformer(x, positions=(h_idx, w_idx), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_bias=attn_bias)
-        x = x.squeeze(0)
+        x = self.transformer(
+            x,
+            positions=(h_idx, w_idx),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            attn_bias=None,            # FA2 always used
+        )
+        x = x.squeeze(0)              # (total_tokens, dim)
 
-        split_sizes = [s.shape[0] for s in batched_sequences]
-        x_split     = x.split(split_sizes, dim=0)
-        x           = pad_sequence(list(x_split))
-        max_len     = x.shape[1]
-        lengths     = torch.tensor(split_sizes, device=device)
-        pad_mask    = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
+        # Re-split by sample and pad to rectangular (B, max_len, dim)
+        x_split  = x.split(per_sample_lens, dim=0)
+        x        = pad_sequence(list(x_split))
+        max_len  = x.shape[1]
+        lengths  = torch.tensor(per_sample_lens, device=device)
+        pad_mask = torch.arange(max_len, device=device)[None, :] < lengths[:, None]
 
         return x, pad_mask

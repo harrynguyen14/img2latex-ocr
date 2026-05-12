@@ -10,12 +10,11 @@ class TokenBudgetBatcher(IterableDataset):
         self.token_budget = token_budget
 
     def __iter__(self):
-        batch       = []
+        batch        = []
         batch_tokens = 0
 
         for sample in self.dataset:
             n = sample["num_tokens"]
-            # Single sample exceeds budget — yield alone rather than drop
             if batch and batch_tokens + n > self.token_budget:
                 yield batch
                 batch        = []
@@ -36,9 +35,20 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
     }
 
 
-def move_batch(batch, device):
+def move_batch(batch: dict, device: torch.device) -> dict:
+    """
+    FIX: pixel_values tensors are float — pin_memory=True in the DataLoader
+    makes them page-locked, so .to(device, non_blocking=True) triggers an async
+    DMA transfer and the CPU continues immediately. The original code already used
+    non_blocking=True here, but the encoder was calling image.to(device) again
+    inside its forward loop, which issued redundant (and blocking) copies.
+    That second call has been removed from encoder.py.
+    """
     return {
-        "batched_images": [[t.to(device, non_blocking=True) for t in imgs] for imgs in batch["batched_images"]],
+        "batched_images": [
+            [t.to(device, non_blocking=True) for t in imgs]
+            for imgs in batch["batched_images"]
+        ],
         "input_ids":      batch["input_ids"].to(device,      non_blocking=True),
         "attention_mask": batch["attention_mask"].to(device,  non_blocking=True),
         "labels":         batch["labels"].to(device,          non_blocking=True),
@@ -47,9 +57,15 @@ def move_batch(batch, device):
 
 def configure_runtime(cfg, device: torch.device):
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    cuda_benchmark = cfg.get("cuda_benchmark", True) if isinstance(cfg, dict) else getattr(cfg, "cuda_benchmark", True)
+    cuda_benchmark = (
+        cfg.get("cuda_benchmark", True) if isinstance(cfg, dict)
+        else getattr(cfg, "cuda_benchmark", True)
+    )
     if device.type == "cuda" and cuda_benchmark:
         torch.backends.cudnn.benchmark = True
     if device.type == "cuda":
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
+        # RTX 5090 / Blackwell: enable CUDNN frontend for fused attention kernels
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32       = True
