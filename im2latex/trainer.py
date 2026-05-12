@@ -81,7 +81,7 @@ def _flatten_tensors(d: dict, prefix: str) -> tuple[dict, dict]:
     for k, v in d.items():
         full_key = f"{prefix}/{k}"
         if isinstance(v, torch.Tensor):
-            tensors[full_key] = v.cpu()
+            tensors[full_key] = v.contiguous().cpu()
         elif isinstance(v, dict):
             t, s = _flatten_tensors(v, full_key)
             tensors.update(t); scalars.update(s)
