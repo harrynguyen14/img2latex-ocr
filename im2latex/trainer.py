@@ -125,11 +125,12 @@ def _parse_weight_stages(stages_str: str, sources: list[str]) -> list[tuple[int,
 
 
 def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir: Path, tokenizer=None):
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = ckpt_dir.parent / (ckpt_dir.name + ".tmp")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     state = {f"visual_encoder.{k}": v.contiguous().cpu() for k, v in model.visual_encoder.state_dict().items()}
     state.update({f"decoder.{k}": v.contiguous().cpu() for k, v in model.decoder.state_dict().items()})
-    st_save_file(state, ckpt_dir / "model.safetensors")
+    st_save_file(state, tmp_dir / "model.safetensors")
 
     opt_tensors, opt_scalars = _flatten_tensors(optimizer.state_dict(), "optimizer")
     sch_tensors, sch_scalars = _flatten_tensors({"state": scheduler.state_dict()}, "scheduler")
@@ -138,13 +139,18 @@ def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir:
     if not trainer_tensors:
         trainer_tensors["_sentinel"] = torch.zeros(1)
     metadata = {k: json.dumps(v) for k, v in trainer_scalars.items()}
-    st_save_file(trainer_tensors, ckpt_dir / "trainer.safetensors", metadata=metadata)
+    st_save_file(trainer_tensors, tmp_dir / "trainer.safetensors", metadata=metadata)
 
-    with open(ckpt_dir / "config.json", "w", encoding="utf-8") as f:
+    with open(tmp_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(model.config, f, indent=2, ensure_ascii=False)
 
     if tokenizer is not None:
-        tokenizer.save_pretrained(str(ckpt_dir / "tokenizer"))
+        tokenizer.save_pretrained(str(tmp_dir / "tokenizer"))
+
+    # Atomic replace: only swap into place after all files are written
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    tmp_dir.rename(ckpt_dir)
 
 
 def _save_best(model, optimizer, scheduler, step, ckpt_dir: Path, tokenizer=None):

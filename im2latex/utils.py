@@ -26,9 +26,12 @@ class TokenBudgetBatcher(IterableDataset):
             yield batch
 
 
+_MAX_TOKEN_LEN = 512.0  # matches --max_token_len
+
+
 def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
     labels = torch.stack([item["labels"] for item in batch])
-    true_len = (labels != -100).sum(dim=1).float()
+    true_len = (labels != -100).sum(dim=1).float() / _MAX_TOKEN_LEN
     return {
         "batched_images": [[item["pixel_values"]] for item in batch],
         "input_ids":      torch.stack([item["input_ids"]      for item in batch]),
