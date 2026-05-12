@@ -161,7 +161,7 @@ class Attention(nn.Module):
 
         dropout_p = self.dropout_p if self.training else 0.0
 
-        if cu_seqlens is not None and _load_flash_attn():
+        if cu_seqlens is not None and not self.training and _load_flash_attn():
             fa_dtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             q_ = rearrange(q, 'b h n d -> (b n) h d').contiguous().to(fa_dtype)
             k_ = rearrange(k, 'b h n d -> (b n) h d').contiguous().to(fa_dtype)
