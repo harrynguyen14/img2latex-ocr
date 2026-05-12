@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .utils import collate_fn, configure_runtime
+from .utils import configure_runtime
 from .build_datasets import build_datasets, build_dataloader
 from .trainer import Trainer
 
@@ -26,9 +26,9 @@ def parse_args():
             "Example: 0:0.8,0.15,0.05;40000:0.6,0.25,0.15;80000:0.45,0.3,0.25"
         ),
     )
-    ap.add_argument("--max_token_len",       type=int,   default=1024)
-    ap.add_argument("--max_image_width",     type=int,   default=1024)
-    ap.add_argument("--max_image_height",    type=int,   default=640)
+    ap.add_argument("--max_token_len",       type=int,   default=512)
+    ap.add_argument("--max_visual_tokens",   type=int,   default=1024)
+    ap.add_argument("--max_side",            type=int,   default=2048)
     ap.add_argument("--patch_size",          type=int,   default=4)
 
     ap.add_argument("--decoder_repo_id",     type=str,   default="harryrobert/nav2tex-decoder")
@@ -41,11 +41,10 @@ def parse_args():
     ap.add_argument("--navit_mlp_dim",       type=int,   default=4096)
     ap.add_argument("--navit_dropout",       type=float, default=0.0)
     ap.add_argument("--navit_emb_dropout",   type=float, default=0.0)
-    ap.add_argument("--max_visual_tokens",   type=int,   default=1024)
 
     ap.add_argument("--decoder_warmup_steps", type=int,   default=5000)
-    ap.add_argument("--batch_size",           type=int,   default=1)
-    ap.add_argument("--eval_batch_size",      type=int,   default=1)
+    ap.add_argument("--token_budget",         type=int,   default=4096,
+                    help="Max total visual tokens per batch (token-budget batching)")
     ap.add_argument("--grad_accum",           type=int,   default=32)
     ap.add_argument("--lr",                   type=float, default=1e-4)
     ap.add_argument("--weight_decay",         type=float, default=0.01)
@@ -70,7 +69,7 @@ def parse_args():
     ap.add_argument("--ckpt_dir",             type=str,   default="/workspace/checkpoints")
     ap.add_argument("--resume",               type=str,   default=None)
 
-    ap.add_argument("--max_new_tokens",       type=int,   default=1024)
+    ap.add_argument("--max_new_tokens",       type=int,   default=512)
     ap.add_argument("--num_beams",            type=int,   default=1)
     ap.add_argument("--early_stopping_patience", type=int, default=0,
                     help="Stop if val_ppl does not improve for this many val checks. 0 = disabled.")
@@ -99,8 +98,8 @@ def main():
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
     persistent = args.persistent_workers and nw > 0
-    train_loader = build_dataloader(train_ds, args.batch_size,      nw, collate_fn, device.type == "cuda", prefetch, persistent)
-    val_loader   = build_dataloader(val_ds,   args.eval_batch_size, nw, collate_fn, device.type == "cuda", prefetch, persistent)
+    train_loader = build_dataloader(train_ds, args.token_budget, nw, device.type == "cuda", prefetch, persistent)
+    val_loader   = build_dataloader(val_ds,   args.token_budget, nw, device.type == "cuda", prefetch, persistent)
 
     trainer = Trainer(args, train_loader, val_loader, device, tokenizer)
     trainer.train()

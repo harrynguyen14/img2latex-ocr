@@ -23,7 +23,7 @@ except ImportError:
     HAS_SAFETENSORS = False
 
 from .build_datasets import build_dataloader
-from .utils import collate_fn, move_batch
+from .utils import move_batch
 from .nav2tex import LaTeXOCRModel
 from .nav2tex.model import decode_ids
 from .evaluate import compute_metrics, print_metrics
@@ -45,16 +45,12 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float):
     }
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 
-    decoder_wd  = [p for n, p in trainable if n.startswith("decoder.") and n not in no_decay]
-    decoder_nd  = [p for n, p in trainable if n.startswith("decoder.") and n in no_decay]
-    encoder_wd  = [p for n, p in trainable if not n.startswith("decoder.") and n not in no_decay]
-    encoder_nd  = [p for n, p in trainable if not n.startswith("decoder.") and n in no_decay]
+    decoder_wd = [p for n, p in trainable if n.startswith("decoder.") and n not in no_decay]
+    decoder_nd = [p for n, p in trainable if n.startswith("decoder.") and n in no_decay]
+    encoder_wd = [p for n, p in trainable if not n.startswith("decoder.") and n not in no_decay]
+    encoder_nd = [p for n, p in trainable if not n.startswith("decoder.") and n in no_decay]
 
-    if HAS_BNB:
-        # 8-bit Adam for decoder params saves ~50% optimizer state memory
-        opt_cls = bnb.optim.AdamW8bit
-    else:
-        opt_cls = AdamW
+    opt_cls = bnb.optim.AdamW8bit if HAS_BNB else AdamW
 
     param_groups = []
     if encoder_wd: param_groups.append({"params": encoder_wd, "weight_decay": weight_decay, "optim_bits": 32})
@@ -70,19 +66,15 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float):
 
 
 def _load_model_state(model: LaTeXOCRModel, state: dict, strict: bool = True) -> None:
-    ve_state  = {k[len("visual_encoder."):]: v
-                 for k, v in state.items() if k.startswith("visual_encoder.")}
-    dec_state = {k[len("decoder."):]: v
-                 for k, v in state.items() if k.startswith("decoder.")}
+    ve_state  = {k[len("visual_encoder."):]: v for k, v in state.items() if k.startswith("visual_encoder.")}
+    dec_state = {k[len("decoder."):]: v       for k, v in state.items() if k.startswith("decoder.")}
 
     if ve_state:
         model.visual_encoder.load_state_dict(ve_state, strict=strict)
         tqdm.write(f"[ckpt] visual_encoder loaded ({len(ve_state)} tensors)")
-
     if dec_state:
         model.decoder.load_state_dict(dec_state, strict=strict)
         tqdm.write(f"[ckpt] decoder loaded ({len(dec_state)} tensors)")
-
     if not ve_state and not dec_state:
         model.load_state_dict(state, strict=strict)
         tqdm.write("[ckpt] model loaded (flat state dict)")
@@ -119,7 +111,6 @@ def _unflatten_tensors(tensors: dict, scalars: dict, prefix: str) -> dict:
 def _parse_weight_stages(stages_str: str, sources: list[str]) -> list[tuple[int, dict[str, float]]]:
     if not stages_str:
         return []
-
     parsed: list[tuple[int, dict[str, float]]] = []
     for chunk in stages_str.split(";"):
         chunk = chunk.strip()
@@ -131,11 +122,8 @@ def _parse_weight_stages(stages_str: str, sources: list[str]) -> list[tuple[int,
         step = int(step_text.strip())
         vals = [float(x.strip()) for x in weights_text.split(",") if x.strip()]
         if len(vals) != len(sources):
-            raise ValueError(
-                f"Stage '{chunk}' has {len(vals)} weights but {len(sources)} sources were provided"
-            )
+            raise ValueError(f"Stage '{chunk}' has {len(vals)} weights but {len(sources)} sources")
         parsed.append((step, {src: val for src, val in zip(sources, vals)}))
-
     parsed.sort(key=lambda x: x[0])
     return parsed
 
@@ -143,10 +131,8 @@ def _parse_weight_stages(stages_str: str, sources: list[str]) -> list[tuple[int,
 def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir: Path, tokenizer=None):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    state = {f"visual_encoder.{k}": v.contiguous().cpu()
-             for k, v in model.visual_encoder.state_dict().items()}
-    state.update({f"decoder.{k}": v.contiguous().cpu()
-                  for k, v in model.decoder.state_dict().items()})
+    state = {f"visual_encoder.{k}": v.contiguous().cpu() for k, v in model.visual_encoder.state_dict().items()}
+    state.update({f"decoder.{k}": v.contiguous().cpu() for k, v in model.decoder.state_dict().items()})
     st_save_file(state, ckpt_dir / "model.safetensors")
 
     opt_tensors, opt_scalars = _flatten_tensors(optimizer.state_dict(), "optimizer")
@@ -188,19 +174,13 @@ def _save_periodic(model, optimizer, scheduler, step, base_dir: Path, keep_last_
 def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict:
     model.eval()
     total_loss, total_batches = 0.0, 0
-    amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16,
-                             enabled=device.type == "cuda")
+    amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
         batch = move_batch(batch, device)
         with amp_ctx:
-            out = model(
-                batch["batched_images"],
-                batch["input_ids"],
-                batch["attention_mask"],
-                batch["labels"],
-            )
+            out = model(batch["batched_images"], batch["input_ids"], batch["attention_mask"], batch["labels"])
         total_loss    += out.loss.item()
         total_batches += 1
     model.train()
@@ -214,7 +194,6 @@ def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict
 def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict:
     model.eval()
     preds, refs = [], []
-
     skip_ids = {model.decoder.pad_token_id, model.decoder.eos_token_id, model.decoder.bos_token_id}
 
     for i, batch in enumerate(loader):
@@ -223,16 +202,12 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
         batch = move_batch(batch, device)
         gen = model.generate(batch["batched_images"])
         preds.extend(gen)
-
         for ids in batch["labels"].cpu().tolist():
-            valid_ids = [x for x in ids if x >= 0]
-            refs.append(decode_ids(model.tokenizer, valid_ids, skip_ids=skip_ids))
+            refs.append(decode_ids(model.tokenizer, [x for x in ids if x >= 0], skip_ids=skip_ids))
 
     model.train()
-
     if not preds:
         return {"bleu4": 0.0, "exact_match": 0.0, "edit_distance": 1.0, "n_samples": 0}
-
     return compute_metrics(preds, refs)
 
 
@@ -339,10 +314,9 @@ class Trainer:
         prefetch = args.prefetch_factor
         persistent = args.persistent_workers and nw > 0
         self.train_loader = build_dataloader(
-            self.train_loader.dataset,
-            args.batch_size,
+            self.train_loader.dataset.dataset,
+            args.token_budget,
             nw,
-            collate_fn,
             self.device.type == "cuda",
             prefetch,
             persistent,
@@ -351,7 +325,8 @@ class Trainer:
     def _maybe_switch_weight_stage(self, force: bool = False) -> bool:
         if not self.weight_stages:
             return False
-        if not hasattr(self.train_loader.dataset, "set_weights"):
+        underlying = self.train_loader.dataset.dataset
+        if not hasattr(underlying, "set_weights"):
             return False
 
         target_idx = -1
@@ -367,7 +342,7 @@ class Trainer:
             return False
 
         stage_step, stage_weights = self.weight_stages[target_idx]
-        self.train_loader.dataset.set_weights(stage_weights)
+        underlying.set_weights(stage_weights)
         self._rebuild_train_loader()
         self.active_weight_stage = target_idx
         tqdm.write(
@@ -392,6 +367,8 @@ class Trainer:
 
         val_loss_steps = getattr(args, "val_loss_steps", 2500)
         eval_steps     = getattr(args, "eval_steps", 10000)
+        max_val_batches = max(args.eval_samples, 1)
+        bleu_batches    = max(getattr(args, "bleu_samples", 1500), 1)
 
         pbar = tqdm(total=self.total_steps, initial=self.global_step,
                     desc="Train", unit="step",
@@ -413,9 +390,9 @@ class Trainer:
             batch = move_batch(batch, self.device)
             loss, lm_loss, len_loss = self._forward_loss(batch)
             (loss / accum).backward()
-            accum_loss    += loss.item()    / accum
-            accum_lm_loss += lm_loss.item() / accum
-            accum_len_loss+= len_loss.item()/ accum
+            accum_loss     += loss.item()     / accum
+            accum_lm_loss  += lm_loss.item()  / accum
+            accum_len_loss += len_loss.item() / accum
             micro += 1
 
             if micro < accum:
@@ -440,10 +417,9 @@ class Trainer:
                 self._unfreeze_decoder()
 
             if self.global_step % args.log_steps == 0:
-                lr_now    = self.scheduler.get_last_lr()[0]
-                train_ppl = math.exp(min(accum_loss, 20.0))
+                lr_now = self.scheduler.get_last_lr()[0]
                 tqdm.write(str({
-                    "ppl":       round(train_ppl, 2),
+                    "ppl":       round(math.exp(min(accum_loss, 20.0)), 2),
                     "loss":      round(accum_loss,     4),
                     "lm":        round(accum_lm_loss,  4),
                     "len":       round(accum_len_loss, 4),
@@ -456,8 +432,6 @@ class Trainer:
             accum_len_loss = 0.0
 
             if self.global_step % val_loss_steps == 0:
-                ebs = getattr(args, "eval_batch_size", 1)
-                max_val_batches = max(args.eval_samples // ebs, 1)
                 val_metrics = run_val_loss(self.model, self.val_loader, self.device, max_val_batches)
                 tqdm.write(str({"step": self.global_step, **val_metrics}))
 
@@ -475,12 +449,8 @@ class Trainer:
                         break
 
             if self.global_step % eval_steps == 0:
-                ebs = getattr(args, "eval_batch_size", 1)
-                bleu_batches = max(getattr(args, "bleu_samples", 1500) // ebs, 1)
                 try:
-                    bleu_metrics = run_bleu_eval(
-                        self.model, self.val_loader, self.device, bleu_batches
-                    )
+                    bleu_metrics = run_bleu_eval(self.model, self.val_loader, self.device, bleu_batches)
                     print_metrics(bleu_metrics, prefix=f"step {self.global_step}")
                     tqdm.write(str({"step": self.global_step, **bleu_metrics}))
                 except Exception as e:
@@ -496,9 +466,8 @@ class Trainer:
                        self.global_step, self.ckpt_dir, keep_last_n=3, tokenizer=self.tokenizer)
         print(f"Training done at step {self.global_step}. Best val_ppl={self.best_val_ppl:.2f}")
 
-        ebs = getattr(args, "eval_batch_size", 1)
         final_samples = getattr(args, "final_eval_samples", 0)
-        final_batches = (final_samples // ebs) if final_samples > 0 else 10000
+        final_batches = final_samples if final_samples > 0 else 10000
         print(f"Running final eval on {final_batches} batches ...")
         final_loss = run_val_loss(self.model, self.val_loader, self.device, final_batches)
         final_bleu = run_bleu_eval(self.model, self.val_loader, self.device, final_batches)

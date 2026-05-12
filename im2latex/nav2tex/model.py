@@ -49,9 +49,7 @@ class LaTeXOCRModel(nn.Module):
             max_visual_tokens=config["max_visual_tokens"],
         )
 
-        self.decoder = Nav2TexDecoder(
-            repo_id=config.get("decoder_repo_id", "harryrobert/nav2tex-decoder"),
-        )
+        self.decoder  = Nav2TexDecoder(repo_id=config.get("decoder_repo_id", "harryrobert/nav2tex-decoder"))
         self.tokenizer = tokenizer
 
     def freeze_decoder(self):
@@ -63,13 +61,7 @@ class LaTeXOCRModel(nn.Module):
             if p.dtype.is_floating_point:
                 p.requires_grad = True
 
-    def forward(
-        self,
-        batched_images,
-        input_ids:      torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels:         torch.Tensor,
-    ):
+    def forward(self, batched_images, input_ids, attention_mask, labels):
         ve, _ = self.visual_encoder(batched_images)
         loss, lm_loss, len_loss = self.decoder(
             input_ids,
@@ -87,19 +79,14 @@ class LaTeXOCRModel(nn.Module):
         num_beams      = num_beams      or cfg.get("num_beams", 1)
 
         ve, _ = self.visual_encoder(batched_images)
-
         generated = self.decoder.generate(
             encoder_output=ve,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
         )
 
-        skip = {self.decoder.pad_token_id, self.decoder.eos_token_id,
-                self.decoder.bos_token_id}
-        return [
-            decode_ids(self.tokenizer, ids, skip_ids=skip)
-            for ids in generated
-        ]
+        skip = {self.decoder.pad_token_id, self.decoder.eos_token_id, self.decoder.bos_token_id}
+        return [decode_ids(self.tokenizer, ids, skip_ids=skip) for ids in generated]
 
     @classmethod
     def from_pretrained(cls, ckpt_dir: str, device: str = "cpu", tokenizer=None):
@@ -109,10 +96,8 @@ class LaTeXOCRModel(nn.Module):
             config = json.load(f)
         model = cls(config, tokenizer=tokenizer)
         state = load_file(str(ckpt / "model.safetensors"), device=device)
-        ve_state  = {k[len("visual_encoder."):]: v
-                     for k, v in state.items() if k.startswith("visual_encoder.")}
-        dec_state = {k[len("decoder."):]: v
-                     for k, v in state.items() if k.startswith("decoder.")}
+        ve_state  = {k[len("visual_encoder."):]: v for k, v in state.items() if k.startswith("visual_encoder.")}
+        dec_state = {k[len("decoder."):]: v       for k, v in state.items() if k.startswith("decoder.")}
         if ve_state:
             model.visual_encoder.load_state_dict(ve_state, strict=True)
         if dec_state:

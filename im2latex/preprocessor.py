@@ -9,21 +9,41 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from torch.utils.data import IterableDataset
 
 
-def _pad_to_patch_grid(img: Image.Image, patch_size: int, max_w: int, max_h: int) -> Image.Image:
+def _resize_to_token_budget(
+    img:          Image.Image,
+    max_tokens:   int,
+    patch_stride: int = 4,
+    max_side:     int = 2048,
+    min_side:     int = 16,
+) -> Image.Image:
     w, h = img.size
-    w = min(w, max_w)
-    h = min(h, max_h)
-    if w < img.size[0] or h < img.size[1]:
-        img = img.crop((0, 0, w, h))
-    tw = min((w + patch_size - 1) // patch_size * patch_size, max_w)
-    th = min((h + patch_size - 1) // patch_size * patch_size, max_h)
-    tw = max(tw, patch_size)
-    th = max(th, patch_size)
-    if tw == w and th == h:
-        return img
-    out = Image.new("RGB", (tw, th), (255, 255, 255))
-    out.paste(img, (0, 0))
-    return out
+
+    if w > max_side or h > max_side:
+        scale = min(max_side / w, max_side / h)
+        w = max(int(w * scale), min_side)
+        h = max(int(h * scale), min_side)
+        img = img.resize((w, h), Image.LANCZOS)
+
+    ph = max(h // patch_stride, 1)
+    pw = max(w // patch_stride, 1)
+    if ph * pw > max_tokens:
+        scale  = (max_tokens / (ph * pw)) ** 0.5
+        new_ph = max(int(ph * scale), min_side // patch_stride)
+        new_pw = max(int(pw * scale), min_side // patch_stride)
+        if new_ph * new_pw > max_tokens:
+            if new_ph == min_side // patch_stride:
+                new_pw = max_tokens // new_ph
+            else:
+                new_ph = max_tokens // new_pw
+        h = max(new_ph * patch_stride, min_side)
+        w = max(new_pw * patch_stride, min_side)
+        img = img.resize((w, h), Image.LANCZOS)
+
+    w = max(round(img.size[0] / patch_stride) * patch_stride, min_side)
+    h = max(round(img.size[1] / patch_stride) * patch_stride, min_side)
+    if (w, h) != img.size:
+        img = img.resize((w, h), Image.LANCZOS)
+    return img
 
 
 def _to_tensor(img: Image.Image) -> torch.Tensor:
@@ -33,29 +53,24 @@ def _to_tensor(img: Image.Image) -> torch.Tensor:
 
 def _aug_jpeg(img: Image.Image, quality_range=(40, 85)) -> Image.Image:
     buf = io.BytesIO()
-    q = random.randint(*quality_range)
-    img.save(buf, format="JPEG", quality=q)
+    img.save(buf, format="JPEG", quality=random.randint(*quality_range))
     buf.seek(0)
     return Image.open(buf).convert("RGB")
 
 
 def _aug_gaussian_noise(img: Image.Image, std_range=(5, 25)) -> Image.Image:
     arr = np.array(img, dtype=np.float32)
-    std = random.uniform(*std_range)
-    noise = np.random.normal(0, std, arr.shape)
-    arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    noise = np.random.normal(0, random.uniform(*std_range), arr.shape)
+    return Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8))
 
 
 def _aug_blur(img: Image.Image, radius_range=(0.3, 1.2)) -> Image.Image:
-    r = random.uniform(*radius_range)
-    return img.filter(ImageFilter.GaussianBlur(radius=r))
+    return img.filter(ImageFilter.GaussianBlur(radius=random.uniform(*radius_range)))
 
 
 def _aug_brightness_contrast(img: Image.Image) -> Image.Image:
     img = ImageEnhance.Brightness(img).enhance(random.uniform(0.6, 1.4))
-    img = ImageEnhance.Contrast(img).enhance(random.uniform(0.6, 1.5))
-    return img
+    return ImageEnhance.Contrast(img).enhance(random.uniform(0.6, 1.5))
 
 
 def _aug_dark_mode(img: Image.Image) -> Image.Image:
@@ -65,8 +80,7 @@ def _aug_dark_mode(img: Image.Image) -> Image.Image:
 def _aug_color_tint(img: Image.Image) -> Image.Image:
     arr = np.array(img, dtype=np.float32)
     tint = np.array([random.uniform(0.85, 1.0) for _ in range(3)], dtype=np.float32)
-    arr = np.clip(arr * tint, 0, 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    return Image.fromarray(np.clip(arr * tint, 0, 255).astype(np.uint8))
 
 
 def _aug_shadow_gradient(img: Image.Image) -> Image.Image:
@@ -140,11 +154,17 @@ def _process(sample: dict, tokenizer, args) -> dict:
     aug_mode = getattr(args, "aug_mode", "none")
     if aug_mode != "none":
         pil = apply_augmentation(pil, aug_mode)
-    img = _pad_to_patch_grid(
-        pil, args.patch_size, args.max_image_width,
-        getattr(args, "max_image_height", 640),
+    pil = _resize_to_token_budget(
+        pil,
+        max_tokens=getattr(args, "max_visual_tokens", 1024),
+        patch_stride=getattr(args, "patch_size", 4),
+        max_side=getattr(args, "max_side", 2048),
     )
-    tensor = _to_tensor(img)
+    patch_stride = getattr(args, "patch_size", 4)
+    w, h = pil.size
+    num_tokens = (h // patch_stride) * (w // patch_stride)
+
+    tensor = _to_tensor(pil)
     label = sample.get("latex") or sample.get("label") or ""
     ids = tokenizer.encode(label)
     if len(ids) > args.max_token_len:
@@ -157,6 +177,7 @@ def _process(sample: dict, tokenizer, args) -> dict:
     lab[attention_mask == 0] = -100
     return {
         "pixel_values":   tensor,
+        "num_tokens":     num_tokens,
         "input_ids":      input_ids,
         "attention_mask": attention_mask,
         "labels":         lab,
@@ -175,11 +196,11 @@ class Nav2TexTrainDataset(IterableDataset):
         world_size: int = 1,
         seed: int = 42,
     ):
-        self.tokenizer   = tokenizer
-        self.args        = args
-        self.rank        = rank
-        self.world_size  = world_size
-        self.seed        = seed
+        self.tokenizer  = tokenizer
+        self.args       = args
+        self.rank       = rank
+        self.world_size = world_size
+        self.seed       = seed
 
         self.source_files: dict[str, list[Path]] = {}
         self.weights: dict[str, float] = {}
