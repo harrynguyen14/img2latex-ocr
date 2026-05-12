@@ -176,7 +176,8 @@ def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict
             break
         batch = move_batch(batch, device)
         with amp_ctx:
-            out = model(batch["batched_images"], batch["input_ids"], batch["attention_mask"], batch["labels"])
+            out = model(batch["batched_images"], batch["input_ids"], batch["attention_mask"], batch["labels"],
+                        true_len=batch.get("true_len"))
         total_loss    += out.loss.item()
         total_batches += 1
     model.train()
@@ -311,6 +312,7 @@ class Trainer:
                 batch["input_ids"],
                 batch["attention_mask"],
                 batch["labels"],
+                true_len=batch.get("true_len"),
             )
         return out.loss, out.lm_loss, out.len_loss
 

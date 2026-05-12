@@ -27,11 +27,14 @@ class TokenBudgetBatcher(IterableDataset):
 
 
 def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
+    labels = torch.stack([item["labels"] for item in batch])
+    true_len = (labels != -100).sum(dim=1).float()
     return {
         "batched_images": [[item["pixel_values"]] for item in batch],
         "input_ids":      torch.stack([item["input_ids"]      for item in batch]),
         "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
-        "labels":         torch.stack([item["labels"]         for item in batch]),
+        "labels":         labels,
+        "true_len":       true_len,
     }
 
 
@@ -52,6 +55,7 @@ def move_batch(batch: dict, device: torch.device) -> dict:
         "input_ids":      batch["input_ids"].to(device,      non_blocking=True),
         "attention_mask": batch["attention_mask"].to(device,  non_blocking=True),
         "labels":         batch["labels"].to(device,          non_blocking=True),
+        "true_len":       batch["true_len"].to(device,        non_blocking=True),
     }
 
 

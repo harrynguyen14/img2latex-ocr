@@ -104,13 +104,14 @@ class LaTeXOCRModel(nn.Module):
             if p.dtype.is_floating_point:
                 p.requires_grad = True
 
-    def forward(self, batched_images, input_ids, attention_mask, labels):
+    def forward(self, batched_images, input_ids, attention_mask, labels, true_len=None):
         ve, _ = self.visual_encoder(batched_images)
         loss, lm_loss, len_loss = self.decoder(
             input_ids,
             attention_mask=attention_mask,
             encoder_output=ve,
             labels=labels,
+            true_len=true_len,
         )
         return type("Out", (), {"loss": loss, "lm_loss": lm_loss, "len_loss": len_loss})()
 
