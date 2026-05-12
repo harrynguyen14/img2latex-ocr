@@ -311,18 +311,20 @@ class Trainer:
         prefetch = args.prefetch_factor
         persistent = args.persistent_workers and nw > 0
         self.train_loader = build_dataloader(
-            self.train_loader.dataset.dataset,
+            self.train_loader.dataset,
             args.token_budget,
             nw,
             self.device.type == "cuda",
             prefetch,
             persistent,
+            args.max_visual_tokens,
         )
 
     def _maybe_switch_weight_stage(self, force: bool = False) -> bool:
         if not self.weight_stages:
             return False
-        underlying = self.train_loader.dataset.dataset
+        ds = self.train_loader.dataset
+        underlying = ds.dataset if hasattr(ds, "dataset") else ds
         if not hasattr(underlying, "set_weights"):
             return False
 

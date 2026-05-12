@@ -28,8 +28,8 @@ def build_datasets(args, tokenizer):
     return train_ds, val_ds
 
 
-def build_dataloader(ds, token_budget: int, nw: int, pin: bool, prefetch: int, persistent: bool):
-    median_tokens_per_image = 128  # after FGE stride=patch_size resize
+def build_dataloader(ds, token_budget: int, nw: int, pin: bool, prefetch: int, persistent: bool, max_visual_tokens: int = 512):
+    median_tokens_per_image = max_visual_tokens // 4  # median ≈ 25% of max
     batch_size = max(1, token_budget // median_tokens_per_image)
     kw = {
         "batch_size":  batch_size,

@@ -98,8 +98,8 @@ def main():
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
     persistent = args.persistent_workers and nw > 0
-    train_loader = build_dataloader(train_ds, args.token_budget, nw, device.type == "cuda", prefetch, persistent)
-    val_loader   = build_dataloader(val_ds,   args.token_budget, nw, device.type == "cuda", prefetch, persistent)
+    train_loader = build_dataloader(train_ds, args.token_budget, nw, device.type == "cuda", prefetch, persistent, args.max_visual_tokens)
+    val_loader   = build_dataloader(val_ds,   args.token_budget, nw, device.type == "cuda", prefetch, persistent, args.max_visual_tokens)
 
     trainer = Trainer(args, train_loader, val_loader, device, tokenizer)
     trainer.train()
