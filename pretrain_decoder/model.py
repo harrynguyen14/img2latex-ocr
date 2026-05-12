@@ -104,16 +104,24 @@ class FFN(nn.Module):
 class LengthAwareModule(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.attn = nn.MultiheadAttention(
-            config.d_model, config.n_heads, dropout=config.dropout, batch_first=True, bias=False,
-        )
+        self.n_heads  = config.n_heads
+        self.head_dim = config.d_model // config.n_heads
+        self.q_proj   = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.k_proj   = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.v_proj   = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.norm     = nn.LayerNorm(config.d_model)
         self.mlp      = nn.Sequential(nn.Linear(config.d_model, config.d_model // 2), nn.GELU(), nn.Linear(config.d_model // 2, 1))
         self.len_proj = nn.Linear(1, config.d_model)
 
     def forward(self, encoder_out):
-        x, _ = self.attn(encoder_out, encoder_out, encoder_out)
-        x    = self.norm(x + encoder_out).mean(dim=1)
+        B, S, C = encoder_out.shape
+        q = self.q_proj(encoder_out).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(encoder_out).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(encoder_out).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = self.out_proj(out.transpose(1, 2).reshape(B, S, C))
+        x = self.norm(out + encoder_out).mean(dim=1)
         pred_len = self.mlp(x)
         return pred_len.squeeze(-1), self.len_proj(pred_len)
 
@@ -191,7 +199,7 @@ class DecoderLM(nn.Module):
 
         if pred_len is not None and true_len is not None:
             len_loss  = F.smooth_l1_loss(pred_len, true_len)
-            lam_lambda = getattr(self.config, "lam_lambda", 0.1)
+            lam_lambda = getattr(self.config, "lam_lambda", 0.01)
             return lm_loss + lam_lambda * len_loss, lm_loss, len_loss
 
         return lm_loss, lm_loss, torch.zeros(1, device=input_ids.device)
