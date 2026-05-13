@@ -304,6 +304,15 @@ class Trainer:
         if self.decoder_warmup_steps > 0 and self.global_step >= self.decoder_warmup_steps:
             self.model.unfreeze_all()
             print(f"Resuming at step {self.global_step} — decoder already unfrozen")
+            # Rebuild optimizer with full param groups (encoder + decoder) before loading state
+            self.optimizer = _make_optimizer(
+                self.model, getattr(args, "encoder_lr", args.lr),
+                getattr(args, "decoder_lr", args.lr), args.weight_decay,
+            )
+            remaining = self.total_steps - self.global_step
+            self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=0, max_steps=max(remaining, 1))
+
+        self._apply_resume_opt()
 
         self._maybe_switch_weight_stage(force=True)
 
@@ -317,6 +326,7 @@ class Trainer:
         self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
 
     def _load_resume(self, resume_dir: Path):
+        """Load model weights + step. Returns raw opt/sch state dicts for deferred loading."""
         sf = resume_dir / "model.safetensors"
         if not sf.exists():
             print(f"[resume] No model.safetensors in {resume_dir}")
@@ -325,31 +335,40 @@ class Trainer:
         _load_model_state(self.model, st_load_file(str(sf)), strict=False)
 
         trainer_sf = resume_dir / "trainer.safetensors"
-        if trainer_sf.exists():
-            from safetensors import safe_open
-            trainer_tensors = st_load_file(str(trainer_sf), device="cpu")
-            trainer_tensors.pop("_sentinel", None)
-            with safe_open(str(trainer_sf), framework="pt", device="cpu") as f:
-                metadata = f.metadata() or {}
-            trainer_scalars = {k: json.loads(v) for k, v in metadata.items()}
+        if not trainer_sf.exists():
+            return
 
-            self.global_step = int(trainer_scalars.get("step", 0))
+        from safetensors import safe_open
+        trainer_tensors = st_load_file(str(trainer_sf), device="cpu")
+        trainer_tensors.pop("_sentinel", None)
+        with safe_open(str(trainer_sf), framework="pt", device="cpu") as f:
+            metadata = f.metadata() or {}
+        trainer_scalars = {k: json.loads(v) for k, v in metadata.items()}
 
-            opt_sd = _unflatten_tensors(trainer_tensors, trainer_scalars, "optimizer")
-            sch_sd = _unflatten_tensors(trainer_tensors, trainer_scalars, "scheduler")
-            sch_sd = sch_sd.get("state", sch_sd)
+        self.global_step = int(trainer_scalars.get("step", 0))
+        self._resume_opt_sd  = _unflatten_tensors(trainer_tensors, trainer_scalars, "optimizer")
+        self._resume_sch_sd  = _unflatten_tensors(trainer_tensors, trainer_scalars, "scheduler").get("state", {})
 
-            device = next(self.model.parameters()).device
-            for s in opt_sd.get("state", {}).values():
-                for k, v in s.items():
-                    if isinstance(v, torch.Tensor):
-                        s[k] = v.to(device)
-            try:
-                self.optimizer.load_state_dict(opt_sd)
+    def _apply_resume_opt(self):
+        """Load optimizer+scheduler state saved by _load_resume, after param groups are final."""
+        opt_sd = getattr(self, "_resume_opt_sd", None)
+        sch_sd = getattr(self, "_resume_sch_sd", None)
+        if opt_sd is None:
+            return
+        device = next(self.model.parameters()).device
+        for s in opt_sd.get("state", {}).values():
+            for k, v in s.items():
+                if isinstance(v, torch.Tensor):
+                    s[k] = v.to(device)
+        try:
+            self.optimizer.load_state_dict(opt_sd)
+            if sch_sd:
                 self.scheduler.load_state_dict(sch_sd)
-                print(f"[resume] optimizer+scheduler loaded, step={self.global_step}")
-            except Exception as e:
-                print(f"[resume] WARNING: Could not load optimizer/scheduler: {e}")
+            print(f"[resume] optimizer+scheduler loaded, step={self.global_step}")
+        except Exception as e:
+            print(f"[resume] WARNING: Could not load optimizer/scheduler: {e}")
+        self._resume_opt_sd = None
+        self._resume_sch_sd = None
 
     def _forward_loss(self, batch) -> tuple:
         true_len = (
