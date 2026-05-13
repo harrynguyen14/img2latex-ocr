@@ -33,6 +33,9 @@ class VisualEncoder(nn.Module):
         else:
             ph = math.isqrt(T)
             pw = T // ph
+            # Truncate any remainder tokens so ph*pw == the slice we view
+            x        = x[:, : ph * pw, :]
+            pad_mask = pad_mask[:, : ph * pw]
 
         target = self.max_visual_tokens
         out_ph = max(1, math.isqrt(target))
