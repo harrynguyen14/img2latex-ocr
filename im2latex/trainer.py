@@ -194,21 +194,53 @@ def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict
 
 
 @torch.no_grad()
-def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict:
+def run_bleu_eval(model: LaTeXOCRModel, loader, device, n_samples: int) -> dict:
+    import random as _random
+    import pyarrow.parquet as pq
+    from .preprocessor import _process
+    from .utils import make_collate_fn
+
+    ds = loader.dataset
+    underlying = ds.dataset if hasattr(ds, "dataset") else ds
+    files = getattr(underlying, "files", [])
+
+    all_rows: list[dict] = []
+    for pfile in files:
+        table = pq.read_table(str(pfile), columns=["image", "latex"])
+        images = table["image"].to_pylist()
+        latexs = table["latex"].to_pylist()
+        for img_raw, lat in zip(images, latexs):
+            if lat and isinstance(lat, str) and lat.strip() and img_raw is not None:
+                all_rows.append({"image": img_raw, "latex": lat.strip()})
+
+    chosen = _random.sample(all_rows, min(n_samples, len(all_rows)))
+
+    args = underlying.args
+    tokenizer = underlying.tokenizer
+    collate = make_collate_fn(args.max_token_len)
+    batch_size = loader.batch_size or 20
+
     model.eval()
     preds, refs = [], []
     skip_ids = {model.decoder.pad_token_id, model.decoder.eos_token_id, model.decoder.bos_token_id}
     try:
-        for i, batch in enumerate(loader):
-            if i >= max_batches:
-                break
-            batch = move_batch(batch, device)
+        for start in range(0, len(chosen), batch_size):
+            items = []
+            for row in chosen[start: start + batch_size]:
+                try:
+                    items.append(_process(row, tokenizer, args))
+                except Exception:
+                    pass
+            if not items:
+                continue
+            batch = move_batch(collate(items), device)
             gen = model.generate(batch["batched_images"])
             preds.extend(gen)
             for ids in batch["labels"].cpu().tolist():
                 refs.append(decode_ids(model.tokenizer, [x for x in ids if x >= 0], skip_ids=skip_ids))
     finally:
         model.train()
+
     if not preds:
         return {"bleu4": 0.0, "exact_match": 0.0, "edit_distance": 1.0, "n_samples": 0}
     return compute_metrics(preds, refs)
@@ -438,8 +470,8 @@ class Trainer:
 
         val_loss_steps  = getattr(args, "val_loss_steps", 2500)
         eval_steps      = getattr(args, "eval_steps", 10000)
-        max_val_batches = max(args.eval_samples, 1)
-        bleu_batches    = max(getattr(args, "bleu_samples", 1500), 1)
+        max_val_batches = max(math.ceil(args.eval_samples / args.batch_size), 1)
+        bleu_n_samples  = max(getattr(args, "bleu_samples", 512), 1)
 
         pbar = tqdm(total=self.total_steps, initial=self.global_step,
                     desc="Train", unit="step",
@@ -544,7 +576,7 @@ class Trainer:
 
             if self.global_step % eval_steps == 0:
                 try:
-                    bleu_metrics = run_bleu_eval(self.model, self.val_loader, self.device, bleu_batches)
+                    bleu_metrics = run_bleu_eval(self.model, self.val_loader, self.device, bleu_n_samples)
                     print_metrics(bleu_metrics, prefix=f"step {self.global_step}")
                     tqdm.write(str({"step": self.global_step, **bleu_metrics}))
                 except Exception as e:
@@ -561,8 +593,9 @@ class Trainer:
         print(f"Training done at step {self.global_step}. Best val_ppl={self.best_val_ppl:.2f}")
 
         final_samples = getattr(args, "final_eval_samples", 0)
-        final_batches = final_samples if final_samples > 0 else 10000
-        print(f"Running final eval on {final_batches} batches ...")
+        final_n       = final_samples if final_samples > 0 else bleu_n_samples
+        final_batches = max(math.ceil(final_n / args.batch_size), 1)
+        print(f"Running final eval on {final_n} samples ...")
         final_loss = run_val_loss(self.model, self.val_loader, self.device, final_batches)
-        final_bleu = run_bleu_eval(self.model, self.val_loader, self.device, final_batches)
+        final_bleu = run_bleu_eval(self.model, self.val_loader, self.device, final_n)
         print_metrics({**final_loss, **final_bleu}, prefix="final")
