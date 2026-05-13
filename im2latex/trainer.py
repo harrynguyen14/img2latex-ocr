@@ -238,7 +238,8 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, n_samples: int) -> dict:
                 continue
             batch = move_batch(collate(items), device)
             gen = model.generate(batch["batched_images"])
-            preds.extend(gen)
+            for ids in gen:
+                preds.append(decode_ids(model.tokenizer, ids, skip_ids=skip_ids))
             for ids in batch["labels"].cpu().tolist():
                 refs.append(decode_ids(model.tokenizer, [x for x in ids if x >= 0], skip_ids=skip_ids))
     finally:
