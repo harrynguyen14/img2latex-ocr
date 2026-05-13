@@ -223,8 +223,11 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, n_samples: int) -> dict:
     model.eval()
     preds, refs = [], []
     skip_ids = {model.decoder.pad_token_id, model.decoder.eos_token_id, model.decoder.bos_token_id}
+    n_batches = math.ceil(len(chosen) / batch_size)
     try:
-        for start in range(0, len(chosen), batch_size):
+        for start in tqdm(range(0, len(chosen), batch_size), total=n_batches,
+                          desc="BLEU eval", unit="batch", leave=False,
+                          file=sys.stdout, position=1, dynamic_ncols=True):
             items = []
             for row in chosen[start: start + batch_size]:
                 try:
