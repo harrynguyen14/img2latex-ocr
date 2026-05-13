@@ -1,6 +1,8 @@
 import os
-import torch
+from functools import partial
 from typing import Any
+
+import torch
 from torch.utils.data import IterableDataset
 
 
@@ -26,12 +28,9 @@ class TokenBudgetBatcher(IterableDataset):
             yield batch
 
 
-_MAX_TOKEN_LEN = 512.0  # matches --max_token_len
-
-
-def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
-    labels = torch.stack([item["labels"] for item in batch])
-    true_len = (labels != -100).sum(dim=1).float() / _MAX_TOKEN_LEN
+def collate_fn(batch: list[dict[str, Any]], max_token_len: int) -> dict[str, torch.Tensor | list]:
+    labels   = torch.stack([item["labels"] for item in batch])
+    true_len = (labels != -100).sum(dim=1).float() / float(max_token_len)
     return {
         "batched_images": [[item["pixel_values"]] for item in batch],
         "input_ids":      torch.stack([item["input_ids"]      for item in batch]),
@@ -41,15 +40,11 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor | list]:
     }
 
 
+def make_collate_fn(max_token_len: int):
+    return partial(collate_fn, max_token_len=max_token_len)
+
+
 def move_batch(batch: dict, device: torch.device) -> dict:
-    """
-    FIX: pixel_values tensors are float — pin_memory=True in the DataLoader
-    makes them page-locked, so .to(device, non_blocking=True) triggers an async
-    DMA transfer and the CPU continues immediately. The original code already used
-    non_blocking=True here, but the encoder was calling image.to(device) again
-    inside its forward loop, which issued redundant (and blocking) copies.
-    That second call has been removed from encoder.py.
-    """
     return {
         "batched_images": [
             [t.to(device, non_blocking=True) for t in imgs]
@@ -73,6 +68,5 @@ def configure_runtime(cfg, device: torch.device):
     if device.type == "cuda":
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
-        # RTX 5090 / Blackwell: enable CUDNN frontend for fused attention kernels
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32       = True

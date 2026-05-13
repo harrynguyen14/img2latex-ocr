@@ -47,10 +47,16 @@ def parse_args():
     ap.add_argument("--navit_dropout",       type=float, default=0.0)
     ap.add_argument("--navit_emb_dropout",   type=float, default=0.0)
 
-    ap.add_argument("--decoder_warmup_steps", type=int,   default=5000)
+    ap.add_argument("--decoder_warmup_steps", type=int,   default=2000)
+    ap.add_argument("--len_loss_start_step",  type=int,   default=15000,
+                    help="Step at which to enable len_loss (LAM). Should be well after decoder unfreeze.")
     ap.add_argument("--batch_size",           type=int,   default=16)
     ap.add_argument("--grad_accum",           type=int,   default=32)
     ap.add_argument("--lr",                   type=float, default=1e-4)
+    ap.add_argument("--encoder_lr",           type=float, default=1e-4,
+                    help="LR for visual encoder and LAM (all non-decoder params).")
+    ap.add_argument("--decoder_lr",           type=float, default=1e-5,
+                    help="LR for decoder after unfreeze.")
     ap.add_argument("--weight_decay",         type=float, default=0.01)
     ap.add_argument("--max_grad_norm",        type=float, default=1.0)
     ap.add_argument("--warmup_ratio",         type=float, default=0.05)
@@ -59,8 +65,8 @@ def parse_args():
     ap.add_argument("--val_loss_steps",       type=int,   default=2500)
     ap.add_argument("--eval_steps",           type=int,   default=10000)
     ap.add_argument("--save_steps",           type=int,   default=10000)
-    ap.add_argument("--eval_samples",         type=int,   default=512)
-    ap.add_argument("--bleu_samples",         type=int,   default=1500)
+    ap.add_argument("--eval_samples",         type=int,   default=1024)
+    ap.add_argument("--bleu_samples",         type=int,   default=512)
     ap.add_argument("--final_eval_samples",   type=int,   default=0)
     ap.add_argument("--num_workers",          type=int,   default=1)
     ap.add_argument("--prefetch_factor",      type=int,   default=4)
@@ -68,6 +74,11 @@ def parse_args():
     ap.add_argument("--no_cuda_benchmark",    action="store_true", default=False,
                     help="Disable cudnn.benchmark (enabled by default)")
     ap.add_argument("--grad_checkpoint",      action="store_true", default=False)
+    ap.add_argument("--decoder_grad_checkpoint", action="store_true", default=False,
+                    help="Enable gradient checkpointing on the decoder after unfreeze to save activation memory.")
+    ap.add_argument("--unfreeze_grad_accum_divisor", type=int, default=1,
+                    help="Divide grad_accum by this factor when decoder is unfrozen to keep memory stable. "
+                         "E.g. 2 halves micro-batch count, keeping effective batch size unchanged.")
     ap.add_argument("--torch_compile",        action="store_true", default=False)
     ap.add_argument("--seed",                 type=int,   default=42)
 
@@ -75,7 +86,6 @@ def parse_args():
     ap.add_argument("--resume",               type=str,   default=None)
 
     ap.add_argument("--max_new_tokens",       type=int,   default=512)
-    ap.add_argument("--num_beams",            type=int,   default=1)
     ap.add_argument("--early_stopping_patience", type=int, default=0,
                     help="Stop if val_ppl does not improve for this many val checks. 0 = disabled.")
 
@@ -109,8 +119,8 @@ def main():
     nw         = args.num_workers
     prefetch   = args.prefetch_factor
     persistent = args.persistent_workers and nw > 0
-    train_loader = build_dataloader(train_ds, args.batch_size, nw, device.type == "cuda", prefetch, persistent)
-    val_loader   = build_dataloader(val_ds,   args.batch_size, nw, device.type == "cuda", prefetch, persistent)
+    train_loader = build_dataloader(train_ds, args.batch_size, nw, device.type == "cuda", prefetch, persistent, args.max_token_len)
+    val_loader   = build_dataloader(val_ds,   args.batch_size, nw, device.type == "cuda", prefetch, persistent, args.max_token_len)
 
     trainer = Trainer(args, train_loader, val_loader, device, tokenizer)
     trainer.train()

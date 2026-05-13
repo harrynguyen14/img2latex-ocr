@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 from einops import rearrange
 from typing import List
-from functools import partial
+from functools import partial, lru_cache
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts, CheckpointPolicy
 
@@ -21,14 +21,6 @@ def _load_flash_attn():
     except ImportError:
         return False
 
-
-def _build_block_diagonal_mask(cu_seqlens: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    total = int(cu_seqlens[-1].item())
-    mask = torch.full((total, total), float('-inf'), device=cu_seqlens.device, dtype=dtype)
-    for i in range(len(cu_seqlens) - 1):
-        s, e = int(cu_seqlens[i].item()), int(cu_seqlens[i + 1].item())
-        mask[s:e, s:e] = 0.0
-    return mask
 
 
 class RMSNorm(nn.Module):
@@ -203,20 +195,12 @@ class Transformer(nn.Module):
         return CheckpointPolicy.MUST_SAVE if op in _SAVE else CheckpointPolicy.PREFER_RECOMPUTE
 
 
-# ---------------------------------------------------------------------------
-# Position grid cache — avoid meshgrid() allocation on every forward pass
-# ---------------------------------------------------------------------------
-_pos_cache: dict[tuple[int, int, torch.device], tuple[Tensor, Tensor]] = {}
-
-
-def _get_pos_grid(ph: int, pw: int, device: torch.device) -> tuple[Tensor, Tensor]:
-    """Cached flat (h_coords, w_coords) tensors of shape (ph*pw,)."""
-    key = (ph, pw, device)
-    if key not in _pos_cache:
-        h_coords = torch.arange(ph, device=device).repeat_interleave(pw)  # raster order
-        w_coords = torch.arange(pw, device=device).repeat(ph)
-        _pos_cache[key] = (h_coords, w_coords)
-    return _pos_cache[key]
+@lru_cache(maxsize=512)
+def _get_pos_grid(ph: int, pw: int, device_str: str) -> tuple[Tensor, Tensor]:
+    device   = torch.device(device_str)
+    h_coords = torch.arange(ph, device=device).repeat_interleave(pw)
+    w_coords = torch.arange(pw, device=device).repeat(ph)
+    return h_coords, w_coords
 
 
 class NaViT_Encoder(nn.Module):
@@ -254,7 +238,8 @@ class NaViT_Encoder(nn.Module):
           4. seg_lens built entirely on CPU as a plain list → one torch.tensor()
              call at the end, avoiding repeated small GPU allocations.
         """
-        device   = self.device
+        device     = self.device
+        device_str = str(device)
         pad_sequence = partial(orig_pad_sequence, batch_first=True)
 
         all_feats:       list[Tensor] = []   # (ph*pw, dim) per image
@@ -277,7 +262,7 @@ class NaViT_Encoder(nn.Module):
             for (H, W), imgs in size_groups.items():
                 stacked = torch.stack(imgs, dim=0)              # (G, C, H, W)
                 feats, (ph, pw) = self.fge(stacked)             # (G, ph*pw, dim)
-                h_coords, w_coords = _get_pos_grid(ph, pw, device)
+                h_coords, w_coords = _get_pos_grid(ph, pw, device_str)
 
                 for feat in feats.unbind(0):                    # iterate G without copy
                     all_feats.append(feat)

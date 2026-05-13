@@ -2,6 +2,7 @@ import json
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pathlib import Path
 
 from .decoder import Nav2TexDecoder
@@ -21,53 +22,36 @@ class VisualEncoder(nn.Module):
         self.navit = encoder
         self.max_visual_tokens = max_visual_tokens
 
+    def _pool_to_budget(self, x: torch.Tensor, pad_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        B, T, D = x.shape
+        if T <= self.max_visual_tokens:
+            return x, pad_mask
+
+        grid_side = math.isqrt(T)
+        if grid_side * grid_side == T:
+            ph = pw = grid_side
+        else:
+            ph = math.isqrt(T)
+            pw = T // ph
+
+        target = self.max_visual_tokens
+        out_ph = max(1, math.isqrt(target))
+        out_pw = max(1, target // out_ph)
+
+        x_grid = x.view(B, ph, pw, D).permute(0, 3, 1, 2)
+        x_grid = F.adaptive_avg_pool2d(x_grid, (out_ph, out_pw))
+        x_out  = x_grid.permute(0, 2, 3, 1).reshape(B, out_ph * out_pw, D)
+
+        mask_grid = pad_mask.float().view(B, 1, ph, pw)
+        mask_grid = F.adaptive_avg_pool2d(mask_grid, (out_ph, out_pw))
+        mask_out  = (mask_grid.squeeze(1).reshape(B, out_ph * out_pw) > 0.0)
+
+        return x_out, mask_out
+
     def forward(self, batched_images):
         x, pad_mask = self.navit(batched_images)
-        # x:        (B, L, D)   — L = max real tokens in batch after pad_sequence
-        # pad_mask: (B, L)      — True = real token, False = padding from pad_sequence
-
-        if x.shape[1] > self.max_visual_tokens:
-            # BUG FIX 1: tail truncation drops the bottom-right of the image.
-            # Use stride sampling instead — samples uniformly across the full sequence,
-            # preserving spatial coverage of the entire expression.
-            #
-            # Why not just resize upstream? _resize_to_token_budget() already constrains
-            # each image individually, but pad_sequence pads the batch to the longest
-            # sample, so x.shape[1] can exceed max_visual_tokens when batch variance
-            # is high (one very wide image forces all others to be padded out).
-            # In that edge case we still need a truncation strategy here.
-            total = x.shape[1]
-            step  = math.ceil(total / self.max_visual_tokens)
-            idx   = torch.arange(0, total, step, device=x.device)[:self.max_visual_tokens]
-            x        = x[:, idx]
-            pad_mask = pad_mask[:, idx]
-
-        # BUG FIX 2: zero out pad positions in encoder output before passing to decoder.
-        #
-        # Context: NaViT packs multiple images per batch then pads with pad_sequence()
-        # to make a rectangular (B, L, D) tensor. Positions where pad_mask=False are
-        # zero-filled by pad_sequence, but after the truncation branch above the zeros
-        # are still present. More importantly, DecoderLM.forward() does NOT accept an
-        # encoder_attention_mask argument, so the cross-attention inside the decoder
-        # will attend to ALL L positions — including the padding zeros.
-        #
-        # Attending to zero vectors is not catastrophic (they contribute ~0 after
-        # softmax weighting), but they still dilute attention scores for real tokens,
-        # especially when pad ratio is high (short images in a batch with one tall image).
-        #
-        # Fix: replace pad positions with a large negative value in the key/value space.
-        # We cannot inject an attention mask, so we make the pad tokens "invisible" by
-        # filling them with -inf scaled down to a large finite negative — the cross-attn
-        # softmax will drive their weight toward 0 without numerical overflow.
-        #
-        # Concretely: fill pad positions with a learned or fixed "null" embedding.
-        # The simplest stable approach is to fill with 0 (already done by pad_sequence)
-        # AND multiply real tokens by the mask, so any in-place modification to x
-        # before this point doesn't corrupt the pad region.
-        #
-        # Shape broadcast: pad_mask (B, L) → (B, L, 1) for multiplication with (B, L, D)
+        x, pad_mask = self._pool_to_budget(x, pad_mask)
         x = x * pad_mask.unsqueeze(-1)
-
         return x, pad_mask
 
 
@@ -104,6 +88,13 @@ class LaTeXOCRModel(nn.Module):
             if p.dtype.is_floating_point:
                 p.requires_grad = True
 
+    def enable_decoder_grad_checkpoint(self):
+        dec = self.decoder._model
+        if hasattr(dec, "enable_gradient_checkpointing"):
+            dec.enable_gradient_checkpointing()
+        elif hasattr(dec, "transformer") and hasattr(dec.transformer, "grad_checkpoint"):
+            dec.transformer.grad_checkpoint = True
+
     def forward(self, batched_images, input_ids, attention_mask, labels, true_len=None):
         ve, _ = self.visual_encoder(batched_images)
         loss, lm_loss, len_loss = self.decoder(
@@ -116,17 +107,14 @@ class LaTeXOCRModel(nn.Module):
         return type("Out", (), {"loss": loss, "lm_loss": lm_loss, "len_loss": len_loss})()
 
     @torch.no_grad()
-    def generate(self, batched_images, max_new_tokens=None, num_beams=None):
+    def generate(self, batched_images, max_new_tokens=None):
         self.eval()
-        cfg = self.config
-        max_new_tokens = max_new_tokens or cfg.get("max_new_tokens", 256)
-        num_beams      = num_beams      or cfg.get("num_beams", 1)
+        max_new_tokens = max_new_tokens or self.config.get("max_new_tokens", 256)
 
         ve, _ = self.visual_encoder(batched_images)
         generated = self.decoder.generate(
             encoder_output=ve,
             max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
         )
 
         skip = {self.decoder.pad_token_id, self.decoder.eos_token_id, self.decoder.bos_token_id}

@@ -2,10 +2,10 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from .preprocessor import Nav2TexTrainDataset, Nav2TexValDataset
-from .utils import collate_fn
+from .utils import make_collate_fn
 
-_DEFAULT_SOURCES = ["raw", "light", "heavy"]
-_DEFAULT_WEIGHTS = [1.0, 1.0, 1.0]
+_DEFAULT_SOURCES = ("raw", "light", "heavy")
+_DEFAULT_WEIGHTS = (1.0, 1.0, 1.0)
 
 
 def build_datasets(args, tokenizer):
@@ -28,11 +28,11 @@ def build_datasets(args, tokenizer):
     return train_ds, val_ds
 
 
-def build_dataloader(ds, batch_size: int, nw: int, pin: bool, prefetch: int, persistent: bool):
+def build_dataloader(ds, batch_size: int, nw: int, pin: bool, prefetch: int, persistent: bool, max_token_len: int = 512):
     kw = {
         "batch_size":  batch_size,
         "num_workers": nw,
-        "collate_fn":  collate_fn,
+        "collate_fn":  make_collate_fn(max_token_len),
         "pin_memory":  pin,
         "shuffle":     False,
         "drop_last":   True,

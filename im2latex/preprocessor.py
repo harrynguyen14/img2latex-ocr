@@ -4,8 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image
 from torch.utils.data import IterableDataset
 
 
@@ -52,91 +51,6 @@ def _to_tensor(img: Image.Image) -> torch.Tensor:
     return t
 
 
-def _aug_jpeg(img: Image.Image, quality_range=(40, 85)) -> Image.Image:
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=random.randint(*quality_range))
-    buf.seek(0)
-    return Image.open(buf).convert("RGB")
-
-
-def _aug_gaussian_noise(img: Image.Image, std_range=(5, 25)) -> Image.Image:
-    arr = np.array(img, dtype=np.float32)
-    noise = np.random.normal(0, random.uniform(*std_range), arr.shape)
-    return Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8))
-
-
-def _aug_blur(img: Image.Image, radius_range=(0.3, 1.2)) -> Image.Image:
-    return img.filter(ImageFilter.GaussianBlur(radius=random.uniform(*radius_range)))
-
-
-def _aug_brightness_contrast(img: Image.Image) -> Image.Image:
-    img = ImageEnhance.Brightness(img).enhance(random.uniform(0.6, 1.4))
-    return ImageEnhance.Contrast(img).enhance(random.uniform(0.6, 1.5))
-
-
-def _aug_dark_mode(img: Image.Image) -> Image.Image:
-    return ImageOps.invert(img)
-
-
-def _aug_color_tint(img: Image.Image) -> Image.Image:
-    arr = np.array(img, dtype=np.float32)
-    tint = np.array([random.uniform(0.85, 1.0) for _ in range(3)], dtype=np.float32)
-    return Image.fromarray(np.clip(arr * tint, 0, 255).astype(np.uint8))
-
-
-def _aug_shadow_gradient(img: Image.Image) -> Image.Image:
-    arr = np.array(img, dtype=np.float32)
-    h, w = arr.shape[:2]
-    if random.random() < 0.5:
-        grad = np.linspace(random.uniform(0.75, 1.0), 1.0, w, dtype=np.float32)
-        arr *= grad[np.newaxis, :, np.newaxis]
-    else:
-        grad = np.linspace(random.uniform(0.75, 1.0), 1.0, h, dtype=np.float32)
-        arr *= grad[:, np.newaxis, np.newaxis]
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-
-
-def _aug_screenshot_border(img: Image.Image) -> Image.Image:
-    pad = random.randint(4, 20)
-    bg = (random.randint(200, 255),) * 3
-    out = Image.new("RGB", (img.width + 2 * pad, img.height + 2 * pad), bg)
-    out.paste(img, (pad, pad))
-    return out
-
-
-def apply_augmentation(img: Image.Image, aug_mode: str = "none") -> Image.Image:
-    if aug_mode == "none":
-        return img
-
-    if aug_mode == "light":
-        if random.random() < 0.5:
-            img = _aug_brightness_contrast(img)
-        if random.random() < 0.3:
-            img = _aug_blur(img, (0.2, 0.7))
-        return img
-
-    if aug_mode == "heavy":
-        if random.random() < 0.5:
-            img = _aug_jpeg(img, (35, 80))
-        if random.random() < 0.7:
-            img = _aug_brightness_contrast(img)
-        if random.random() < 0.5:
-            img = _aug_blur(img, (0.3, 1.5))
-        if random.random() < 0.4:
-            img = _aug_gaussian_noise(img, (5, 25))
-        if random.random() < 0.2:
-            img = _aug_dark_mode(img)
-        if random.random() < 0.3:
-            img = _aug_shadow_gradient(img)
-        if random.random() < 0.25:
-            img = _aug_color_tint(img)
-        if random.random() < 0.2:
-            img = _aug_screenshot_border(img)
-        return img
-
-    return img
-
-
 def _decode_image(raw) -> Image.Image:
     if isinstance(raw, Image.Image):
         return raw.convert("RGB")
@@ -152,11 +66,8 @@ def _decode_image(raw) -> Image.Image:
 
 def _process(sample: dict, tokenizer, args) -> dict:
     pil = _decode_image(sample["image"])
-    aug_mode = getattr(args, "aug_mode", "none")
-    if aug_mode != "none":
-        pil = apply_augmentation(pil, aug_mode)
     patch_size = getattr(args, "patch_size", 4)
-    effective_stride = patch_size  # FGE = 2× stride-2 conv → total stride = patch_size
+    effective_stride = patch_size
     pil = _resize_to_token_budget(
         pil,
         max_tokens=getattr(args, "max_visual_tokens", 1024),
@@ -238,10 +149,15 @@ class Nav2TexTrainDataset(IterableDataset):
         num_workers = worker_info.num_workers if worker_info else 1
         rng = random.Random(self.seed + worker_id + self.rank * 1000)
 
-        iters  = {src: self._stream_source(files, rng) for src, files in self.source_files.items()}
+        shard_files: dict[str, list[Path]] = {
+            src: [f for i, f in enumerate(files) if i % num_workers == worker_id]
+            for src, files in self.source_files.items()
+        }
+        shard_files = {src: files for src, files in shard_files.items() if files}
+
+        iters  = {src: self._stream_source(files, rng) for src, files in shard_files.items()}
         active = set(iters.keys())
         names  = list(iters.keys())
-        global_idx = 0
 
         while active:
             avail   = [s for s in names if s in active]
@@ -253,12 +169,10 @@ class Nav2TexTrainDataset(IterableDataset):
                 active.discard(chosen)
                 continue
 
-            if global_idx % num_workers == worker_id:
-                try:
-                    yield _process(sample, self.tokenizer, self.args)
-                except Exception:
-                    pass
-            global_idx += 1
+            try:
+                yield _process(sample, self.tokenizer, self.args)
+            except Exception:
+                pass
 
 
 class Nav2TexValDataset(IterableDataset):

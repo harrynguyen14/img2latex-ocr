@@ -34,7 +34,7 @@ def cosine_with_warmup(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float):
+def _make_optimizer(model: LaTeXOCRModel, encoder_lr: float, decoder_lr: float, weight_decay: float):
     no_decay = {
         n for n, p in model.named_parameters()
         if p.requires_grad and (p.ndim < 2 or "norm" in n.lower() or n.endswith(".bias"))
@@ -49,16 +49,12 @@ def _make_optimizer(model: LaTeXOCRModel, lr: float, weight_decay: float):
     opt_cls = bnb.optim.AdamW8bit if HAS_BNB else AdamW
 
     param_groups = []
-    if encoder_wd: param_groups.append({"params": encoder_wd, "weight_decay": weight_decay, "optim_bits": 32})
-    if encoder_nd: param_groups.append({"params": encoder_nd, "weight_decay": 0.0,          "optim_bits": 32})
-    if decoder_wd: param_groups.append({"params": decoder_wd, "weight_decay": weight_decay})
-    if decoder_nd: param_groups.append({"params": decoder_nd, "weight_decay": 0.0})
+    if encoder_wd: param_groups.append({"params": encoder_wd, "lr": encoder_lr, "weight_decay": weight_decay})
+    if encoder_nd: param_groups.append({"params": encoder_nd, "lr": encoder_lr, "weight_decay": 0.0})
+    if decoder_wd: param_groups.append({"params": decoder_wd, "lr": decoder_lr, "weight_decay": weight_decay})
+    if decoder_nd: param_groups.append({"params": decoder_nd, "lr": decoder_lr, "weight_decay": 0.0})
 
-    if not HAS_BNB:
-        for g in param_groups:
-            g.pop("optim_bits", None)
-
-    return opt_cls(param_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8)
+    return opt_cls(param_groups, lr=encoder_lr, betas=(0.9, 0.95), eps=1e-8)
 
 
 def _load_model_state(model: LaTeXOCRModel, state: dict, strict: bool = True) -> None:
@@ -147,10 +143,12 @@ def _write_ckpt(model: LaTeXOCRModel, optimizer, scheduler, step: int, ckpt_dir:
     if tokenizer is not None:
         tokenizer.save_pretrained(str(tmp_dir / "tokenizer"))
 
-    # Atomic replace: only swap into place after all files are written
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
-    tmp_dir.rename(ckpt_dir)
+    try:
+        tmp_dir.rename(ckpt_dir)
+    except OSError:
+        shutil.move(str(tmp_dir), str(ckpt_dir))
 
 
 def _save_best(model, optimizer, scheduler, step, ckpt_dir: Path, tokenizer=None):
@@ -177,16 +175,18 @@ def run_val_loss(model: LaTeXOCRModel, loader, device, max_batches: int) -> dict
     model.eval()
     total_loss, total_batches = 0.0, 0
     amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
-    for i, batch in enumerate(loader):
-        if i >= max_batches:
-            break
-        batch = move_batch(batch, device)
-        with amp_ctx:
-            out = model(batch["batched_images"], batch["input_ids"], batch["attention_mask"], batch["labels"],
-                        true_len=batch.get("true_len"))
-        total_loss    += out.loss.item()
-        total_batches += 1
-    model.train()
+    try:
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            batch = move_batch(batch, device)
+            with amp_ctx:
+                out = model(batch["batched_images"], batch["input_ids"], batch["attention_mask"], batch["labels"],
+                            true_len=batch.get("true_len"))
+            total_loss    += out.loss.item()
+            total_batches += 1
+    finally:
+        model.train()
     if total_batches == 0:
         return {"val_loss": float("inf"), "val_ppl": float("inf")}
     avg = total_loss / total_batches
@@ -198,17 +198,17 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, max_batches: int) -> dic
     model.eval()
     preds, refs = [], []
     skip_ids = {model.decoder.pad_token_id, model.decoder.eos_token_id, model.decoder.bos_token_id}
-
-    for i, batch in enumerate(loader):
-        if i >= max_batches:
-            break
-        batch = move_batch(batch, device)
-        gen = model.generate(batch["batched_images"])
-        preds.extend(gen)
-        for ids in batch["labels"].cpu().tolist():
-            refs.append(decode_ids(model.tokenizer, [x for x in ids if x >= 0], skip_ids=skip_ids))
-
-    model.train()
+    try:
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            batch = move_batch(batch, device)
+            gen = model.generate(batch["batched_images"])
+            preds.extend(gen)
+            for ids in batch["labels"].cpu().tolist():
+                refs.append(decode_ids(model.tokenizer, [x for x in ids if x >= 0], skip_ids=skip_ids))
+    finally:
+        model.train()
     if not preds:
         return {"bleu4": 0.0, "exact_match": 0.0, "edit_distance": 1.0, "n_samples": 0}
     return compute_metrics(preds, refs)
@@ -228,6 +228,7 @@ class Trainer:
         self.global_step          = 0
         self.best_val_ppl         = float("inf")
         self.decoder_warmup_steps = args.decoder_warmup_steps
+        self.len_loss_start_step  = getattr(args, "len_loss_start_step", 15000)
         self.sources              = list(getattr(args, "sources", []))
         self.weight_stages        = _parse_weight_stages(getattr(args, "weight_stages", ""), self.sources)
         self.active_weight_stage  = -1
@@ -254,7 +255,12 @@ class Trainer:
             print(f"Decoder frozen for first {self.decoder_warmup_steps} steps")
 
         warmup_steps   = max(1, int(args.max_steps * args.warmup_ratio))
-        self.optimizer = _make_optimizer(self.model, args.lr, args.weight_decay)
+        self.optimizer = _make_optimizer(
+            self.model,
+            encoder_lr=getattr(args, "encoder_lr", args.lr),
+            decoder_lr=getattr(args, "decoder_lr", args.lr),
+            weight_decay=args.weight_decay,
+        )
         self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps, self.total_steps)
 
         if getattr(args, "resume", None):
@@ -266,13 +272,13 @@ class Trainer:
 
         self._maybe_switch_weight_stage(force=True)
 
-        # FIX: cache trainable param list once — avoid list comprehension every step
+        self._accum_after_unfreeze: int = self.args.grad_accum
+
         self._trainable_params: list[nn.Parameter] = [
             p for p in self.model.parameters() if p.requires_grad
         ]
 
     def _refresh_trainable_params(self):
-        """Call after freeze/unfreeze to rebuild cached param list."""
         self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
 
     def _load_resume(self, resume_dir: Path):
@@ -311,6 +317,11 @@ class Trainer:
                 print(f"[resume] WARNING: Could not load optimizer/scheduler: {e}")
 
     def _forward_loss(self, batch) -> tuple:
+        true_len = (
+            batch.get("true_len")
+            if self.global_step >= self.len_loss_start_step
+            else None
+        )
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,
                             enabled=self.device.type == "cuda"):
             out = self.model(
@@ -318,7 +329,7 @@ class Trainer:
                 batch["input_ids"],
                 batch["attention_mask"],
                 batch["labels"],
-                true_len=None,  # disabled: lam random-init causes unstable gradients
+                true_len=true_len,
             )
         return out.loss, out.lm_loss, out.len_loss
 
@@ -334,6 +345,7 @@ class Trainer:
             self.device.type == "cuda",
             prefetch,
             persistent,
+            args.max_token_len,
         )
 
     def _maybe_switch_weight_stage(self, force: bool = False) -> bool:
@@ -367,18 +379,60 @@ class Trainer:
         return True
 
     def _unfreeze_decoder(self):
+        old_opt_state = self.optimizer.state_dict()
+        old_param_to_idx = {
+            id(p): i
+            for i, p in enumerate(
+                p for g in self.optimizer.param_groups for p in g["params"]
+            )
+        }
+
         self.model.unfreeze_all()
-        self.optimizer = _make_optimizer(self.model, self.args.lr, self.args.weight_decay)
-        remaining = self.total_steps - self.global_step
+
+        if getattr(self.args, "decoder_grad_checkpoint", False):
+            self.model.enable_decoder_grad_checkpoint()
+            tqdm.write("  [unfreeze] decoder gradient checkpointing enabled")
+
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        divisor = max(1, getattr(self.args, "unfreeze_grad_accum_divisor", 1))
+        if divisor > 1:
+            self._accum_after_unfreeze = max(1, self.args.grad_accum // divisor)
+            tqdm.write(
+                f"  [unfreeze] grad_accum {self.args.grad_accum} → {self._accum_after_unfreeze} "
+                f"(divisor={divisor}, effective batch unchanged)"
+            )
+        else:
+            self._accum_after_unfreeze = self.args.grad_accum
+
+        self.optimizer = _make_optimizer(
+            self.model, self.args.encoder_lr, self.args.decoder_lr, self.args.weight_decay
+        )
+
+        new_state = self.optimizer.state_dict()
+        transferred = 0
+        flat_new_params = [p for g in self.optimizer.param_groups for p in g["params"]]
+        for new_flat_idx, p in enumerate(flat_new_params):
+            old_flat_idx = old_param_to_idx.get(id(p))
+            if old_flat_idx is not None and old_flat_idx in old_opt_state.get("state", {}):
+                new_state["state"][new_flat_idx] = old_opt_state["state"][old_flat_idx]
+                transferred += 1
+        self.optimizer.load_state_dict(new_state)
+
+        remaining      = self.total_steps - self.global_step
         decoder_rewarm = min(500, remaining // 20)
         self.scheduler = cosine_with_warmup(self.optimizer, warmup_steps=decoder_rewarm, max_steps=remaining)
-        # Rebuild cached param list after unfreeze
         self._refresh_trainable_params()
-        tqdm.write(f"  [unfreeze] decoder unfrozen at step {self.global_step}, optimizer reset, rewarmup={decoder_rewarm}")
+        tqdm.write(
+            f"  [unfreeze] decoder unfrozen at step {self.global_step}, "
+            f"encoder_lr={self.args.encoder_lr:.1e}, decoder_lr={self.args.decoder_lr:.1e}, "
+            f"rewarmup={decoder_rewarm}, transferred_opt_states={transferred}"
+        )
 
     def train(self):
         args       = self.args
-        accum      = args.grad_accum
         micro      = 0
         data_iter  = iter(self.train_loader)
 
@@ -394,14 +448,14 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
-        # FIX: accumulate loss on GPU as a tensor — defer .item() (CPU sync)
-        # to only once per optimizer step (at log time), not every micro-step.
         device = self.device
         accum_loss     = torch.zeros(1, device=device)
         accum_lm_loss  = torch.zeros(1, device=device)
         accum_len_loss = torch.zeros(1, device=device)
 
         while self.global_step < self.total_steps:
+            accum = self._accum_after_unfreeze
+
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -414,7 +468,6 @@ class Trainer:
             scaled = loss / accum
             scaled.backward()
 
-            # Accumulate on GPU — no CPU sync here
             with torch.no_grad():
                 accum_loss     += loss     / accum
                 accum_lm_loss  += lm_loss  / accum
@@ -424,11 +477,10 @@ class Trainer:
             if micro < accum:
                 continue
 
-            # FIX: use cached _trainable_params — no list comprehension per step
             grad_norm = nn.utils.clip_grad_norm_(
                 self._trainable_params,
                 args.max_grad_norm,
-            ).item()  # one sync here is unavoidable (need scalar for logging)
+            ).item()
 
             self.optimizer.step()
             self.scheduler.step()
@@ -442,14 +494,24 @@ class Trainer:
 
             if self.decoder_warmup_steps > 0 and self.global_step == self.decoder_warmup_steps:
                 self._unfreeze_decoder()
+                micro = 0
+                accum_loss.zero_()
+                accum_lm_loss.zero_()
+                accum_len_loss.zero_()
 
             if self.global_step % args.log_steps == 0:
-                # Single .item() call per log interval — pull all three at once
                 loss_val     = accum_loss.item()
                 lm_loss_val  = accum_lm_loss.item()
                 len_loss_val = accum_len_loss.item()
                 lr_now       = self.scheduler.get_last_lr()[0]
+                if self.global_step < self.decoder_warmup_steps:
+                    phase = "freeze"
+                elif self.global_step < self.len_loss_start_step:
+                    phase = "joint"
+                else:
+                    phase = "lam"
                 tqdm.write(str({
+                    "phase":     phase,
                     "ppl":       round(math.exp(min(loss_val, 20.0)), 2),
                     "loss":      round(loss_val,     4),
                     "lm":        round(lm_loss_val,  4),
@@ -459,7 +521,6 @@ class Trainer:
                     "step":      self.global_step,
                 }))
 
-            # Reset GPU accumulators
             accum_loss.zero_()
             accum_lm_loss.zero_()
             accum_len_loss.zero_()
