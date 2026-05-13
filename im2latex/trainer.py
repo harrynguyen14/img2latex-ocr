@@ -318,7 +318,7 @@ class Trainer:
                 batch["input_ids"],
                 batch["attention_mask"],
                 batch["labels"],
-                true_len=batch.get("true_len"),
+                true_len=None,  # disabled: lam random-init causes unstable gradients
             )
         return out.loss, out.lm_loss, out.len_loss
 
