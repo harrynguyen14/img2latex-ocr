@@ -246,6 +246,12 @@ def run_bleu_eval(model: LaTeXOCRModel, loader, device, n_samples: int) -> dict:
 
     if not preds:
         return {"bleu4": 0.0, "exact_match": 0.0, "edit_distance": 1.0, "n_samples": 0}
+
+    # Debug: log a few samples to diagnose BLEU=0
+    for i in range(min(3, len(preds))):
+        tqdm.write(f"[bleu_debug] pred[{i}]: {repr(preds[i][:120])}")
+        tqdm.write(f"[bleu_debug]  ref[{i}]: {repr(refs[i][:120])}")
+
     return compute_metrics(preds, refs)
 
 
